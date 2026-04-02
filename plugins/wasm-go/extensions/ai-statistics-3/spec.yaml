@@ -1,0 +1,182 @@
+apiVersion: 1.0.0
+
+info:
+  category: custom
+  name: ai-statistics/v1
+  title: AI Statistics
+  description: 统计 AI 模型的 Token 使用量，支持上报到外部 API，记录输入/输出/总 token 数、模型名称、用户标识等关键指标。
+  x-description-i18n:
+    en-US: Collect AI model token usage statistics and report to external API, recording input/output/total token count, model name, user identity and other key metrics.
+  iconUrl: https://img.alicdn.com/imgextra/i2/O1CN01z3z5xz1iVZ2VCvtxL_!!6000000004429-2-tps-42-42.png
+  version: 2.0.0
+  contact:
+    name: Higress Team
+    url: http://higress.cn/
+    email: admin@higress.io
+
+spec:
+  phase: AUTHN
+  priority: 100
+
+  configSchema:
+    openAPIV3Schema:
+      type: object
+      x-scope: GLOBAL
+
+      properties:
+        reportApiUrl:
+          type: string
+          title: 上报 API 地址
+          x-title-i18n:
+            en-US: Report API URL
+          description: 接收 token 使用量上报的完整 API 地址
+          x-description-i18n:
+            en-US: The complete API URL to receive token usage reports.
+          minLength: 1
+          maxLength: 512
+          pattern: "^https?://.*"
+          example: http://api.example.com/model/usage/report
+
+        reportServiceName:
+          type: string
+          title: 上报服务名称
+          x-title-i18n:
+            en-US: Report Service Name
+          description: Higress 中配置的用于调用上报 API 的服务名称
+          x-description-i18n:
+            en-US: The service name configured in Higress for calling the report API.
+          minLength: 1
+          maxLength: 256
+          example: open-platform-service
+
+        reportTimeout:
+          type: integer
+          title: 上报超时时间（毫秒）
+          x-title-i18n:
+            en-US: Report Timeout (ms)
+          description: 调用上报 API 的超时时间，单位为毫秒
+          x-description-i18n:
+            en-US: The timeout for calling the report API in milliseconds.
+          minimum: 100
+          maximum: 60000
+          default: 5000
+          example: 5000
+
+        enable_path_suffixes:
+          type: array
+          title: 启用的路径后缀
+          x-title-i18n:
+            en-US: Enabled Path Suffixes
+          description: 仅统计指定路径后缀的请求，留空或设为 ["*"] 表示统计所有路径
+          x-description-i18n:
+            en-US: Only report requests with matching path suffixes. Leave empty or set to ["*"] to report all paths.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          example:
+            - /v1/chat/completions
+            - /v1/completions
+            - /generateContent
+
+        enable_content_types:
+          type: array
+          title: 启用的响应类型
+          x-title-i18n:
+            en-US: Enabled Content Types
+          description: 仅统计指定响应类型的请求，留空或设为 ["*"] 表示统计所有类型
+          x-description-i18n:
+            en-US: Only report requests with matching response content types. Leave empty or set to ["*"] to report all types.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          example:
+            - text/event-stream
+            - application/json
+
+        attributes:
+          type: array
+          title: 自定义属性
+          x-title-i18n:
+            en-US: Custom Attributes
+          description: 自定义额外的日志和 Span 属性，可以从请求头、响应头、请求体、响应体中提取值
+          x-description-i18n:
+            en-US: Custom additional log and span attributes, can extract values from request/response headers and body.
+          items:
+            type: object
+            required:
+              - key
+              - value_source
+            properties:
+              key:
+                type: string
+                title: 属性键名
+                x-title-i18n:
+                  en-US: Attribute Key
+                description: 自定义属性的键名
+                x-description-i18n:
+                  en-US: The key name of the custom attribute.
+                minLength: 1
+                maxLength: 128
+                example: custom_field
+
+              value_source:
+                type: string
+                title: 值来源
+                x-title-i18n:
+                  en-US: Value Source
+                description: 属性值的来源类型
+                x-description-i18n:
+                  en-US: The source type of the attribute value.
+                enum:
+                  - request_header
+                  - response_header
+                  - request_body
+                  - response_body
+                  - response_streaming_body
+                  - fixed_value
+                example: request_header
+
+              value:
+                type: string
+                title: 值提取表达式
+                x-title-i18n:
+                  en-US: Value Extraction Expression
+                description: 当 value_source 为 request_header/response_header 时，为 header 名称；为 request_body/response_body/response_streaming_body 时，为 JSON Path 表达式；为 fixed_value 时，为固定值
+                x-description-i18n:
+                  en-US: When value_source is request_header/response_header, this is the header name; when request_body/response_body/response_streaming_body, this is JSON Path expression; when fixed_value, this is the fixed value.
+                minLength: 1
+                maxLength: 256
+                example: x-custom-header
+
+              apply_to_log:
+                type: boolean
+                title: 应用到日志
+                x-title-i18n:
+                  en-US: Apply to Log
+                description: 是否将此属性应用到访问日志
+                x-description-i18n:
+                  en-US: Whether to apply this attribute to access logs.
+                default: true
+                example: true
+
+      required:
+        - reportApiUrl
+        - reportServiceName
+
+      example:
+        reportApiUrl: http://api.example.com/model/usage/report
+        reportServiceName: open-platform-service
+        reportTimeout: 5000
+        enable_path_suffixes:
+          - /v1/chat/completions
+          - /v1/completions
+        enable_content_types:
+          - text/event-stream
+          - application/json
+        attributes:
+          - key: custom_field
+            value_source: fixed_value
+            value: custom_value
+            apply_to_log: true
