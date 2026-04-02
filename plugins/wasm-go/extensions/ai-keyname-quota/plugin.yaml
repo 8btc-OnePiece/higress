@@ -1,0 +1,58 @@
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-keyname-quota
+  namespace: higress-system
+spec:
+  defaultConfig:
+    authHeader: "Authorization"
+    apiKeyParamName: "key"
+    global_redis_key_prefix: "keyname_quota:"
+    unmatched_action: "continue"
+    keyNameService:
+      service_name: "wujieai-pref"
+      api_url: "https://pref-gate.wujieai.com/open-platform-private/apiKey/info"
+      timeout: 5000
+    redis:
+      service_name: redis-master.redis.svc.cluster.local
+      service_port: 6379
+      username: ""
+      password: ""
+      timeout: 2000
+      database: 0
+    quota_pools:
+      - key_name_prefix: "外部培训"
+        quota_limit: 1000000
+        redis_key_prefix: "external_training"
+      - key_name_prefix: "内部"
+        quota_limit: 10000000
+        redis_key_prefix: "internal"
+  defaultConfigDisable: true
+  matchRules:
+  - config:
+      authHeader: "Authorization"
+      apiKeyParamName: "apiKey"
+      global_redis_key_prefix: "ai_gateway:key_quota:"
+      unmatched_action: "continue"
+      keyNameService:
+        service_name: "wujieai-pref"
+        api_url: "https://pref-gate.wujieai.com/open-platform-private/apiKey/info"
+        timeout: 5000
+      redis:
+        service_name: redis
+        service_port: 6379
+        host: redis-master.redis.svc.cluster.local
+        username: ""
+        password: "111"
+        timeout: 3000
+        database: 0
+      quota_pools:
+        - key_name_prefix: "Claw活动321"
+          quota_limit: 10000
+          redis_key_prefix: "claw_activity_321"
+    configDisable: false
+    ingress:
+    - qwen
+  phase: AUTHN
+  priority: 290
+  url: oci://registry.cn-hangzhou.aliyuncs.com/2456868764/ai-keyname-quota:1.0.0

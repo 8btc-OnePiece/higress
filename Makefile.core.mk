@@ -2,7 +2,8 @@ SHELL := /bin/bash -o pipefail
 
 export HIGRESS_BASE_VERSION ?= 2023-07-20T20-50-43
 
-export HUB ?= higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+# export HUB ?= higress-registry.cn-hangzhou.cr.aliyuncs.com/higress
+export HUB ?= swr.cn-east-3.myhuaweicloud.com/btc8_public/higress
 
 export ISTIO_BASE_REGISTRY ?= $(HUB)
 
@@ -19,7 +20,8 @@ GO_LDFLAGS += -X $(VERSION_PACKAGE).higressVersion=$(shell cat VERSION) \
 
 GO ?= go
 
-export GOPROXY ?= https://proxy.golang.org,direct
+# export GOPROXY ?= https://proxy.golang.org,direct
+export GOPROXY ?= https://goproxy.cn,direct
 
 TARGET_ARCH ?= amd64
 
