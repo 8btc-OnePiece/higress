@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# AI Statistics Plugin 构建脚本
+# Key Auth Plugin 构建脚本
 # 支持 Go 1.24 原生编译和 TinyGo 编译两种方式
 
 set -e
 
 echo "========================================="
-echo "Building AI Statistics Plugin"
+echo "Building Key Auth Plugin"
 echo "========================================="
 
 # 获取脚本所在目录
@@ -42,6 +42,10 @@ if [ "$BUILD_MODE" = "go124" ]; then
 
     echo ""
     echo "Building wasm file with Go 1.24 native compiler..."
+
+    # 先清理依赖（与官方流程一致）
+    echo "Running go mod tidy..."
+    go mod tidy
 
     # 使用 Go 1.24 原生编译
     GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o main.wasm ./
@@ -88,17 +92,16 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "Next steps:"
     echo "1. Build Docker image:"
-    echo "   docker build -t ai-statistics:2.0.0 ."
+    echo "   docker build -t key-auth:1.0.0 ."
     echo ""
     echo "2. Push to registry:"
-    echo "   docker tag ai-statistics:2.0.0 your-registry/ai-statistics:2.0.0"
-    echo "   docker push your-registry/ai-statistics:2.0.0"
+    echo "   docker tag key-auth:1.0.0 your-registry/key-auth:1.0.0"
+    echo "   docker push your-registry/key-auth:1.0.0"
     echo ""
     echo "3. Configure in Higress:"
-    echo "   Use image: your-registry/ai-statistics:2.0.0"
+    echo "   Use image: your-registry/key-auth:1.0.0"
 else
     echo ""
     echo "Build failed!"
     exit 1
 fi
-

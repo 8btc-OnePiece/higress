@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# AI Statistics Plugin 构建脚本
+# AI KeyName Quota Plugin 构建脚本
 # 支持 Go 1.24 原生编译和 TinyGo 编译两种方式
 
 set -e
 
 echo "========================================="
-echo "Building AI Statistics Plugin"
+echo "Building AI KeyName Quota Plugin"
 echo "========================================="
 
 # 获取脚本所在目录
@@ -88,17 +88,15 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "Next steps:"
     echo "1. Build Docker image:"
-    echo "   docker build -t ai-statistics:2.0.0 ."
+    echo "   docker build -t ai-keyname-quota:1.0.0 ."
     echo ""
-    echo "2. Push to registry:"
-    echo "   docker tag ai-statistics:2.0.0 your-registry/ai-statistics:2.0.0"
-    echo "   docker push your-registry/ai-statistics:2.0.0"
+    echo "2. Push to OCI registry:"
+    echo "   ./push-oci.sh"
     echo ""
     echo "3. Configure in Higress:"
-    echo "   Use image: your-registry/ai-statistics:2.0.0"
+    echo "   Use image: oci://your-registry/ai-keyname-quota:1.0.0"
 else
     echo ""
     echo "Build failed!"
     exit 1
 fi
-

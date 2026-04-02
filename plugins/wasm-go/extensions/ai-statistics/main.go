@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +39,9 @@ func init() {
 }
 
 const (
-	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
+	defaultMaxBodyBytes        uint32 = 100 * 1024 * 1024
+	defaultReportTimeout       int32  = 5000             // 5 seconds
+	maxStreamingBodyBufferSize int    = 10 * 1024 * 1024 // 10MB limit for streaming buffer
 	// Context consts
 	StatisticsRequestStartTime = "ai-statistics-request-start-time"
 	StatisticsFirstTokenTime   = "ai-statistics-first-token-time"
@@ -45,6 +52,8 @@ const (
 	ClusterName                = "cluster"
 	APIName                    = "api"
 	ConsumerKey                = "x-mse-consumer"
+	OriginalAPIKey             = "X-Original-Api-Key"
+	RequestID                  = "request_id"
 	RequestPath                = "request_path"
 	SkipProcessing             = "skip_processing"
 
@@ -117,6 +126,26 @@ type Attribute struct {
 	AsSeparateLogField bool   `json:"as_separate_log_field,omitempty"`
 }
 
+// TokenUsageReportRequest represents the request body for token usage reporting
+type TokenUsageReportRequest struct {
+	RequestId   string `json:"requestId"`   // 请求唯一ID，格式：{userKey}-{timestamp}-{random}
+	Model       string `json:"model"`       // 模型名称
+	UserKey     string `json:"userKey"`     // 用户Key（从X-Original-Api-Key header获取）
+	InputToken  int32  `json:"inputToken"`  // 输入token数
+	OutputToken int32  `json:"outputToken"` // 输出token数
+	TotalToken  int32  `json:"totalToken"`  // 总token数
+	Duration    int64  `json:"duration"`    // 耗时（毫秒）
+	Timestamp   int64  `json:"timestamp"`   // 时间戳（毫秒）
+}
+
+// TokenUsageReportResponse represents the response from the reporting API
+type TokenUsageReportResponse struct {
+	Success   bool   `json:"success"`   // 是否成功
+	Message   string `json:"message"`   // 响应消息
+	RequestID string `json:"requestId"` // 请求ID
+	Duplicate bool   `json:"duplicate"` // 是否重复请求
+}
+
 type AIStatisticsConfig struct {
 	// Metrics
 	// TODO: add more metrics in Gauge and Histogram format
@@ -132,6 +161,12 @@ type AIStatisticsConfig struct {
 	enablePathSuffixes []string
 	// Content types to enable response body buffering
 	enableContentTypes []string
+
+	// Token usage report configuration
+	reportClient      wrapper.HttpClient
+	reportServiceName string
+	reportApiUrl      string
+	reportTimeout     int32
 }
 
 func generateMetricName(route, cluster, model, consumer, metricName string) string {
@@ -140,6 +175,14 @@ func generateMetricName(route, cluster, model, consumer, metricName string) stri
 
 func getRouteName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
+		return "-", err
+	} else {
+		return string(raw), nil
+	}
+}
+
+func getRequestID() (string, error) {
+	if raw, err := proxywasm.GetProperty([]string{"request", "id"}); err != nil {
 		return "-", err
 	} else {
 		return string(raw), nil
@@ -272,6 +315,58 @@ func parseConfig(configJson gjson.Result, config *AIStatisticsConfig) error {
 		config.enableContentTypes = append(config.enableContentTypes, contentTypeStr)
 	}
 
+	// Parse token usage report configuration
+	config.reportApiUrl = configJson.Get("reportApiUrl").String()
+	if config.reportApiUrl != "" {
+		// Parse URL and extract actual domain and port
+		parsedUrl, err := url.Parse(config.reportApiUrl)
+		if err != nil {
+			log.Errorf("failed to parse reportApiUrl: %v", err)
+			return errors.New("invalid reportApiUrl: " + err.Error())
+		}
+
+		// Extract actual hostname (for Host header and TLS SNI)
+		actualHost := parsedUrl.Hostname()
+		if actualHost == "" {
+			log.Errorf("failed to extract hostname from reportApiUrl: %s", config.reportApiUrl)
+			return errors.New("invalid reportApiUrl: missing hostname")
+		}
+
+		// Extract port, default 80 (HTTP) or 443 (HTTPS)
+		port := int64(80) // Default HTTP
+		if parsedUrl.Scheme == "https" {
+			port = 443 // Default HTTPS
+		}
+
+		// If port is explicitly specified in URL, use the specified port
+		if actualPort := parsedUrl.Port(); actualPort != "" {
+			if p, err := strconv.Atoi(actualPort); err == nil {
+				port = int64(p)
+			}
+		}
+
+		config.reportServiceName = configJson.Get("reportServiceName").String()
+
+		// Create HTTP client using DnsCluster
+		config.reportClient = wrapper.NewClusterClient(wrapper.DnsCluster{
+			ServiceName: config.reportServiceName, // Use domain as service name
+			Domain:      actualHost,               // Actual domain (for Host header and TLS SNI)
+			Port:        port,                     // Port from URL
+		})
+
+		log.Infof("ai-statistics: token usage report configured")
+		log.Infof("  reportApiUrl: %s", config.reportApiUrl)
+		log.Infof("  DnsCluster.ServiceName (服务名): %s", config.reportServiceName)
+		log.Infof("  DnsCluster.Domain (实际域名): %s", actualHost)
+		log.Infof("  DnsCluster.Port (服务端口): %d", port)
+	}
+
+	if configJson.Get("reportTimeout").Exists() {
+		config.reportTimeout = int32(configJson.Get("reportTimeout").Int())
+	} else {
+		config.reportTimeout = defaultReportTimeout
+	}
+
 	return nil
 }
 
@@ -284,6 +379,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 		ctx.SetContext(SkipProcessing, true)
 		ctx.DontReadRequestBody()
 		ctx.DontReadResponseBody()
+		cleanupContext(ctx)
 		return types.ActionContinue
 	}
 
@@ -300,6 +396,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	ctx.SetContext(StatisticsRequestStartTime, time.Now().UnixMilli())
 	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
 		ctx.SetContext(RequestPath, requestPath)
+	}
+	if requestID, _ := getRequestID(); requestID != "" && requestID != "-" {
+		ctx.SetContext(RequestID, requestID)
 	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
@@ -318,8 +417,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Check if processing should be skipped
+	// Check if processing should be skipped first
 	if ctx.GetBoolContext(SkipProcessing, false) {
+		cleanupContext(ctx)
 		return types.ActionContinue
 	}
 
@@ -373,6 +473,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 		// Set skip processing flag and avoid reading response body
 		ctx.SetContext(SkipProcessing, true)
 		ctx.DontReadResponseBody()
+		cleanupContext(ctx)
 		return types.ActionContinue
 	}
 
@@ -387,6 +488,14 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
+	// Ensure cleanup only happens at the end of streaming or when skipping
+	defer func() {
+		// Cleanup when stream ends OR when skipping processing
+		if endOfStream || ctx.GetBoolContext(SkipProcessing, false) {
+			cleanupContext(ctx)
+		}
+	}()
+
 	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
 		return data
@@ -396,10 +505,22 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	if config.shouldBufferStreamingBody {
 		streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		if !ok {
-			streamingBodyBuffer = data
+			streamingBodyBuffer = make([]byte, 0, 1024) // Start with small capacity
+		}
+
+		// Check buffer size limit before appending to prevent uncontrolled growth
+		currentSize := len(streamingBodyBuffer)
+		newSize := currentSize + len(data)
+
+		if newSize > maxStreamingBodyBufferSize {
+			log.Warnf("Streaming body buffer exceeds limit (%d bytes), clearing buffer", newSize)
+			// Clear the buffer to prevent memory accumulation and immediately free the old buffer
+			streamingBodyBuffer = make([]byte, 0, 1024)
 		} else {
+			// Use append with potentially larger data chunks
 			streamingBodyBuffer = append(streamingBodyBuffer, data...)
 		}
+
 		ctx.SetContext(CtxStreamingBodyBuffer, streamingBodyBuffer)
 	}
 
@@ -416,7 +537,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	// Get requestStartTime from http context
 	requestStartTime, ok := ctx.GetContext(StatisticsRequestStartTime).(int64)
 	if !ok {
-		log.Error("failed to get requestStartTime from http context")
+		log.Debugf("requestStartTime not found in http context, skipping metrics")
 		return data
 	}
 
@@ -449,6 +570,8 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 				return data
 			}
 			setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer)
+			// Immediately clear the buffer after use to free memory
+			ctx.SetContext(CtxStreamingBodyBuffer, nil)
 		}
 
 		// Write log
@@ -456,15 +579,30 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 
 		// Write metrics
 		writeMetric(ctx, config)
+
+		// Report token usage to API
+		reportTokenUsageFromContext(ctx, config)
 	}
 	return data
 }
 
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Check if processing should be skipped
+	// Check if processing should be skipped first
 	if ctx.GetBoolContext(SkipProcessing, false) {
+		cleanupContext(ctx)
 		return types.ActionContinue
 	}
+
+	// For normal processing, ensure cleanup at the end
+	defer cleanupContext(ctx)
 
 	// Get requestStartTime from http context
 	requestStartTime, _ := ctx.GetContext(StatisticsRequestStartTime).(int64)
@@ -501,6 +639,9 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 
 	// Write metrics
 	writeMetric(ctx, config)
+
+	// Report token usage to API
+	reportTokenUsageFromContext(ctx, config)
 
 	return types.ActionContinue
 }
@@ -540,17 +681,29 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			if (value == nil || value == "") && attribute.DefaultValue != "" {
 				value = attribute.DefaultValue
 			}
-			if len(fmt.Sprint(value)) > config.valueLengthLimit {
-				value = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
-			}
+
 			log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, value)
 			if attribute.ApplyToLog {
 				if attribute.AsSeparateLogField {
-					marshalledJsonStr := wrapper.MarshalStr(fmt.Sprint(value))
+					// Convert value to string and marshal it
+					strValue := fmt.Sprint(value)
+
+					// Truncate if exceeds limit
+					if len(strValue) > config.valueLengthLimit {
+						halfLen := config.valueLengthLimit / 2
+						strValue = strValue[:halfLen] + " [truncated] " + strValue[len(strValue)-halfLen:]
+					}
+
+					marshalledJsonStr := wrapper.MarshalStr(strValue)
 					if err := proxywasm.SetProperty([]string{key}, []byte(marshalledJsonStr)); err != nil {
 						log.Warnf("failed to set %s in filter state, raw is %s, err is %v", key, marshalledJsonStr, err)
 					}
 				} else {
+					// Truncate value if exceeds limit for regular user attributes
+					if strValue := fmt.Sprint(value); len(strValue) > config.valueLengthLimit {
+						halfLen := config.valueLengthLimit / 2
+						value = strValue[:halfLen] + " [truncated] " + strValue[len(strValue)-halfLen:]
+					}
 					ctx.SetUserAttribute(key, value)
 				}
 			}
@@ -608,37 +761,80 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 }
 
 func extractStreamingBodyByJsonPath(data []byte, jsonPath string, rule string) interface{} {
-	chunks := bytes.Split(bytes.TrimSpace(wrapper.UnifySSEChunk(data)), []byte("\n\n"))
-	var value interface{}
+	// Optimize memory usage by avoiding unnecessary byte slice allocations
+	trimmedData := bytes.TrimSpace(wrapper.UnifySSEChunk(data))
+
+	// Always use streaming approach to avoid creating all chunks at once
+	// This prevents memory allocation spikes in high-concurrency scenarios
+	return extractStreamingBodyLarge(trimmedData, jsonPath, rule)
+}
+
+// extractStreamingBodyLarge handles large streaming body data more efficiently
+func extractStreamingBodyLarge(data []byte, jsonPath string, rule string) interface{} {
 	if rule == RuleFirst {
-		for _, chunk := range chunks {
-			jsonObj := gjson.GetBytes(chunk, jsonPath)
-			if jsonObj.Exists() {
-				value = jsonObj.Value()
+		// For first rule, scan through data and return first match
+		start := 0
+		for {
+			idx := bytes.Index(data[start:], []byte("\n\n"))
+			if idx == -1 {
+				// Last chunk
+				chunk := data[start:]
+				if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+					return jsonObj.Value()
+				}
 				break
 			}
+			chunk := data[start : start+idx]
+			if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+				return jsonObj.Value()
+			}
+			start += idx + 2
 		}
+		return nil
 	} else if rule == RuleReplace {
-		for _, chunk := range chunks {
-			jsonObj := gjson.GetBytes(chunk, jsonPath)
-			if jsonObj.Exists() {
-				value = jsonObj.Value()
+		// For replace rule, return the last matching value
+		var lastValue interface{}
+		start := 0
+		for {
+			idx := bytes.Index(data[start:], []byte("\n\n"))
+			if idx == -1 {
+				chunk := data[start:]
+				if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+					lastValue = jsonObj.Value()
+				}
+				break
 			}
+			chunk := data[start : start+idx]
+			if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+				lastValue = jsonObj.Value()
+			}
+			start += idx + 2
 		}
+		return lastValue
 	} else if rule == RuleAppend {
-		// extract llm response
-		var strValue string
-		for _, chunk := range chunks {
-			jsonObj := gjson.GetBytes(chunk, jsonPath)
-			if jsonObj.Exists() {
-				strValue += jsonObj.String()
+		// For append rule with large data, use strings.Builder
+		var builder strings.Builder
+		builder.Grow(len(data) / 2)
+		start := 0
+		for {
+			idx := bytes.Index(data[start:], []byte("\n\n"))
+			if idx == -1 {
+				chunk := data[start:]
+				if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+					builder.WriteString(jsonObj.String())
+				}
+				break
 			}
+			chunk := data[start : start+idx]
+			if jsonObj := gjson.GetBytes(chunk, jsonPath); jsonObj.Exists() {
+				builder.WriteString(jsonObj.String())
+			}
+			start += idx + 2
 		}
-		value = strValue
-	} else {
-		log.Errorf("unsupported rule type: %s", rule)
+		return builder.String()
 	}
-	return value
+	log.Errorf("unsupported rule type: %s", rule)
+	return nil
 }
 
 // Set the tracing span with value.
@@ -738,4 +934,219 @@ func convertToUInt(val interface{}) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// generateRandomString generates a random string with the given length (max 32)
+func generateRandomString(length int) string {
+	if length > 32 {
+		length = 32
+	}
+	if length <= 0 {
+		length = 8
+	}
+
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	result := make([]byte, length)
+
+	for i := range result {
+		// Generate a random index
+		randomIndex, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		result[i] = charset[randomIndex.Int64()]
+	}
+
+	return string(result)
+}
+
+// reportTokenUsage sends token usage data to the reporting API
+func reportTokenUsage(config AIStatisticsConfig, ctx wrapper.HttpContext, model string, inputTokens, outputTokens, totalTokens uint64, duration int64) {
+	// Add panic recovery to ensure reporting never crashes the main flow
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Panic in reportTokenUsage (recovered): %v", r)
+		}
+	}()
+
+	// Skip if report API client is not configured
+	if config.reportClient == nil {
+		log.Debugf("reportClient not configured, skipping token usage report")
+		return
+	}
+
+	// Get userKey from X-Original-Api-Key header
+	userKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
+	if err != nil || userKey == "" {
+		log.Debugf("X-Original-Api-Key header not found, skipping token usage report")
+		return
+	}
+
+	// Get Envoy request ID from context
+	envoyRequestID := ""
+	if requestIDValue := ctx.GetContext(RequestID); requestIDValue != nil {
+		if requestIDStr, ok := requestIDValue.(string); ok && requestIDStr != "" {
+			envoyRequestID = requestIDStr
+			log.Debugf("Using Envoy request ID: %s", envoyRequestID)
+		}
+	}
+
+	// Generate requestId: use Envoy request ID if available, otherwise fallback to {userKey}-{timestamp}-{random}
+	timestamp := time.Now().UnixMilli()
+	var requestID string
+	if envoyRequestID != "" {
+		// Use Envoy's request ID
+		requestID = envoyRequestID
+	} else {
+		// Fallback to generated ID
+		randomSuffix := generateRandomString(8) // Generate 8-character random string
+		requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)
+	}
+	log.Debugf("reportTokenUsage using generated ID: %s", requestID)
+
+	// Convert uint64 to int32 for JSON marshaling (API expects Integer)
+	inputTokenInt := int32(inputTokens)
+	outputTokenInt := int32(outputTokens)
+	totalTokenInt := int32(totalTokens)
+
+	// Build request body
+	reportReq := TokenUsageReportRequest{
+		RequestId:   requestID,
+		Model:       model,
+		UserKey:     userKey,
+		InputToken:  inputTokenInt,
+		OutputToken: outputTokenInt,
+		TotalToken:  totalTokenInt,
+		Duration:    duration,
+		Timestamp:   timestamp,
+	}
+
+	jsonData, err := json.Marshal(reportReq)
+	if err != nil {
+		log.Errorf("failed to marshal token usage report request: %v", err)
+		return
+	}
+
+	// Parse URL to get path
+	parsedUrl, _ := url.Parse(config.reportApiUrl)
+	requestPath := parsedUrl.Path
+	if requestPath == "" {
+		requestPath = "/"
+	}
+
+	// Add query parameters if present
+	if parsedUrl.RawQuery != "" {
+		requestPath = requestPath + "?" + parsedUrl.RawQuery
+	}
+
+	// Call the reporting API asynchronously
+	log.Infof("Reporting token usage to %s: requestId=%s, model=%s, userKey=%s, inputToken=%d, outputToken=%d, totalToken=%d, duration=%d",
+		config.reportApiUrl, requestID, model, userKey, inputTokenInt, outputTokenInt, totalTokenInt, duration)
+
+	// Make HTTP POST call to report API (non-blocking)
+	err = config.reportClient.Post(
+		requestPath,
+		[][2]string{
+			{"Content-Type", "application/json"},
+		},
+		jsonData,
+		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+			log.Debugf("Token usage report callback: status=%d, requestId=%s", statusCode, requestID)
+		},
+		uint32(config.reportTimeout),
+	)
+
+	if err != nil {
+		log.Errorf("Failed to dispatch token usage report call: %v", err)
+		return
+	}
+
+	log.Debugf("Token usage report initiated successfully for requestId: %s", requestID)
+}
+
+// reportTokenUsageFromContext extracts token usage from context and reports to API
+func reportTokenUsageFromContext(ctx wrapper.HttpContext, config AIStatisticsConfig) {
+	// Add panic recovery to ensure this function never interrupts the main flow
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Panic in reportTokenUsageFromContext (recovered): %v", r)
+		}
+	}()
+
+	// Skip if OpenAI usage is disabled
+	if config.disableOpenaiUsage {
+		return
+	}
+
+	// Skip if report API client is not configured
+	if config.reportClient == nil {
+		return
+	}
+
+	// Get model and token usage from context attributes
+	model, ok := ctx.GetUserAttribute(tokenusage.CtxKeyModel).(string)
+	if !ok || model == "" {
+		log.Debugf("Model not found in context, skipping token usage report")
+		return
+	}
+
+	inputTokenVal := ctx.GetUserAttribute(tokenusage.CtxKeyInputToken)
+	outputTokenVal := ctx.GetUserAttribute(tokenusage.CtxKeyOutputToken)
+	totalTokenVal := ctx.GetUserAttribute(tokenusage.CtxKeyTotalToken)
+
+	// Convert token values to uint64
+	inputTokens, ok := convertToUInt(inputTokenVal)
+	if !ok {
+		log.Debugf("InputToken conversion failed, skipping token usage report")
+		return
+	}
+
+	outputTokens, ok := convertToUInt(outputTokenVal)
+	if !ok {
+		log.Debugf("OutputToken conversion failed, skipping token usage report")
+		return
+	}
+
+	totalTokens, ok := convertToUInt(totalTokenVal)
+	if !ok {
+		log.Debugf("TotalToken conversion failed, skipping token usage report")
+		return
+	}
+
+	// Get duration from context
+	durationVal := ctx.GetUserAttribute(LLMServiceDuration)
+	duration, ok := convertToUInt(durationVal)
+	if !ok {
+		log.Debugf("LLMServiceDuration not found, skipping token usage report")
+		return
+	}
+
+	// Call the report function with duration (in a goroutine-like manner to avoid blocking)
+	// All errors inside reportTokenUsage are handled internally
+	reportTokenUsage(config, ctx, model, inputTokens, outputTokens, totalTokens, int64(duration))
+}
+
+// · cleans up the context data to free memory
+func cleanupContext(ctx wrapper.HttpContext) {
+	// Clear all context data to prevent memory leaks
+	ctx.SetContext(CtxStreamingBodyBuffer, nil)
+	ctx.SetContext(StatisticsRequestStartTime, nil)
+	ctx.SetContext(StatisticsFirstTokenTime, nil)
+	ctx.SetContext(RouteName, nil)
+	ctx.SetContext(ClusterName, nil)
+	ctx.SetContext(RequestID, nil)
+	ctx.SetContext(ConsumerKey, nil)
+	ctx.SetContext(RequestPath, nil)
+
+	// Clear token usage context attributes
+	ctx.SetContext(tokenusage.CtxKeyModel, nil)
+	ctx.SetContext(tokenusage.CtxKeyInputToken, nil)
+	ctx.SetContext(tokenusage.CtxKeyOutputToken, nil)
+	ctx.SetContext(tokenusage.CtxKeyTotalToken, nil)
+
+	// Clear all user attributes to prevent memory leaks in high concurrency scenarios
+	// These are set via ctx.SetUserAttribute() and can accumulate over time
+	ctx.SetUserAttribute(APIName, nil)
+	ctx.SetUserAttribute(ResponseType, nil)
+	ctx.SetUserAttribute(ChatID, nil)
+	ctx.SetUserAttribute(LLMFirstTokenDuration, nil)
+	ctx.SetUserAttribute(LLMServiceDuration, nil)
+	ctx.SetUserAttribute(ChatRound, nil)
 }

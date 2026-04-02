@@ -1,0 +1,525 @@
+# AI Statistics Plugin - 配置实例
+#
+# 本文件包含多种部署场景的配置示例
+
+---
+
+## ==========================================
+## 方式一：Docker 镜像方式（推荐-企业内部）
+## ==========================================
+
+### 示例 1.1：基础配置（使用 Docker 镜像）
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+spec:
+  # Docker 镜像地址（不带 oci:// 前缀）
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  imagePullPolicy: Always
+
+  # 插件配置
+  defaultConfig:
+    # 必填：上报 API 配置
+    reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+    reportServiceName: "pref.dns"
+    reportTimeout: 5000
+
+    # 可选：路径过滤
+    enable_path_suffixes:
+      - "/v1/chat/completions"
+      - "/v1/completions"
+      - "/generateContent"
+
+    # 可选：响应类型过滤
+    enable_content_types:
+      - "text/event-stream"
+      - "application/json"
+```
+
+---
+
+### 示例 1.2：完整配置（带自定义属性）
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+  labels:
+    env: production
+    app: ai-proxy
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  imagePullPolicy: Always
+  failStrategy: FAIL_OPEN  # 插件失败时的策略
+
+  defaultConfig:
+    # Token 上报配置
+    reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+    reportServiceName: "pref.dns"
+    reportTimeout: 5000
+
+    # 路径过滤（统计特定接口）
+    enable_path_suffixes:
+      - "/v1/chat/completions"
+      - "/v1/completions"
+      - "/v1/embeddings"
+
+    # 内容类型过滤
+    enable_content_types:
+      - "text/event-stream"
+      - "application/json"
+
+    # 自定义属性（用于日志和追踪）
+    attributes:
+      # 从请求头提取
+      - key: x_request_id
+        value_source: request_header
+        value: X-Request-Id
+        apply_to_log: true
+
+      # 从请求体提取（JSONPath）
+      - key: model
+        value_source: request_body
+        value: model
+        apply_to_log: true
+
+      # 从响应体提取
+      - key: response_id
+        value_source: response_body
+        value: id
+        apply_to_log: true
+
+      # 固定值
+      - key: environment
+        value_source: fixed_value
+        value: production
+        apply_to_log: true
+```
+
+---
+
+### 示例 1.3：按路由配置（matchRules）
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  imagePullPolicy: Always
+
+  # 全局默认禁用
+  defaultConfigDisable: true
+  failStrategy: FAIL_OPEN
+
+  # 按路由匹配规则
+  matchRules:
+    # 规则 1：DeepSeek 模型路由
+    - config:
+        reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+        reportServiceName: "pref.dns"
+        reportTimeout: 5000
+        enable_path_suffixes:
+          - "/v1/chat/completions"
+      configDisable: false  # 启用此规则
+      ingress:
+        - ai-route-deepseek.internal
+        - ai-route-deepseek-v3.1.internal
+
+    # 规则 2：其他模型路由
+    - config:
+        reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+        reportServiceName: "pref.dns"
+        reportTimeout: 5000
+        enable_path_suffixes:
+          - "/v1/completions"
+      configDisable: false
+      ingress:
+        - ai-route-gpt.internal
+        - ai-route-claude.internal
+```
+
+---
+
+## ==========================================
+## 方式二：OCI 镜像方式（标准规范）
+## ==========================================
+
+### 示例 2.1：基础配置（使用 OCI 镜像）
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+spec:
+  # OCI 镜像地址（带 oci:// 前缀）
+  url: oci://registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-statistics:1.0.0
+  phase: AUTHN
+  priority: 100
+  imagePullPolicy: Always
+
+  defaultConfig:
+    reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+    reportServiceName: "pref.dns"
+    reportTimeout: 5000
+```
+
+---
+
+### 示例 2.2：按域名配置
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+spec:
+  url: oci://registry.cn-hangzhou.cr.aliyuncs.com/plugins/ai-statistics:1.0.0
+  phase: AUTHN
+  priority: 100
+
+  matchRules:
+    - config:
+        reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+        reportServiceName: "pref.dns"
+      configDisable: false
+      domain:
+        - ai.example.com
+        - api.example.com
+```
+
+---
+
+## ==========================================
+## 高级配置场景
+## ==========================================
+
+### 场景 1：多环境部署
+
+```yaml
+# 开发环境
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics-dev
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  defaultConfig:
+    reportApiUrl: "http://dev-api.example.com/model/usage/report"
+    reportServiceName: "dev-api-service"
+    reportTimeout: 10000  # 开发环境超时时间更长
+    attributes:
+      - key: environment
+        value_source: fixed_value
+        value: development
+        apply_to_log: true
+```
+
+```yaml
+# 生产环境
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics-prod
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  defaultConfig:
+    reportApiUrl: "http://pref-gate.wujieai.com/open-platform-private/model/usage/report"
+    reportServiceName: "pref.dns"
+    reportTimeout: 5000
+    attributes:
+      - key: environment
+        value_source: fixed_value
+        value: production
+        apply_to_log: true
+```
+
+---
+
+### 场景 2：灰度发布（新旧版本共存）
+
+```yaml
+# 旧版本（v1.0.0）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics-v1
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  defaultConfigDisable: true  # 默认禁用
+  matchRules:
+    - configDisable: false
+      ingress:
+        - legacy-route.internal  # 仅对旧路由生效
+```
+
+```yaml
+# 新版本（v2.0.0）
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics-v2
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-2.0.0
+  phase: AUTHN
+  priority: 100
+  defaultConfigDisable: true
+  matchRules:
+    - configDisable: false
+      ingress:
+        - new-feature-route.internal  # 仅对新路由生效
+```
+
+---
+
+### 场景 3：多租户配置
+
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-statistics
+  namespace: higress-system
+spec:
+  url: registry.cn-hangzhou.aliyuncs.com/higress-ailong/plugins:ai-statistics-1.0.0
+  phase: AUTHN
+  priority: 100
+  defaultConfigDisable: true
+
+  matchRules:
+    # 租户 A
+    - config:
+        reportApiUrl: "http://tenant-a.example.com/model/usage/report"
+        reportServiceName: "tenant-a-service"
+        attributes:
+          - key: tenant_id
+            value_source: fixed_value
+            value: tenant_a
+            apply_to_log: true
+      configDisable: false
+      ingress:
+        - tenant-a-route.internal
+
+    # 租户 B
+    - config:
+        reportApiUrl: "http://tenant-b.example.com/model/usage/report"
+        reportServiceName: "tenant-b-service"
+        attributes:
+          - key: tenant_id
+            value_source: fixed_value
+            value: tenant_b
+            apply_to_log: true
+      configDisable: false
+      ingress:
+        - tenant-b-route.internal
+```
+
+---
+
+## ==========================================
+## 部署命令
+## ==========================================
+
+### 1. 应用配置
+
+```bash
+# 应用基础配置
+kubectl apply -f ai-statistics-basic.yaml
+
+# 应用完整配置
+kubectl apply -f ai-statistics-full.yaml
+
+# 应用按路由配置
+kubectl apply -f ai-statistics-match-rules.yaml
+```
+
+### 2. 查看状态
+
+```bash
+# 查看插件列表
+kubectl get wasmplugin -n higress-system
+
+# 查看插件详情
+kubectl describe wasmplugin ai-statistics -n higress-system
+
+# 查看插件 YAML
+kubectl get wasmplugin ai-statistics -n higress-system -o yaml
+```
+
+### 3. 更新配置
+
+```bash
+# 方式一：直接编辑
+kubectl edit wasmplugin ai-statistics -n higress-system
+
+# 方式二：应用新配置
+kubectl apply -f ai-statistics-updated.yaml
+```
+
+### 4. 删除插件
+
+```bash
+kubectl delete wasmplugin ai-statistics -n higress-system
+```
+
+### 5. 验证功能
+
+```bash
+# 查看 Gateway 日志
+kubectl logs -n higress-system -l app=higress-gateway --tail=100 | grep ai-statistics
+
+# 发送测试请求
+curl -X POST http://your-gateway/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# 检查上报日志
+kubectl logs -n higress-system <gateway-pod> | grep "reporting token usage"
+```
+
+---
+
+## ==========================================
+## 常见配置问题
+## ==========================================
+
+### Q1: URL 格式错误
+
+**错误**：无法拉取镜像
+
+**原因**：Docker 方式使用了 `oci://` 前缀，或 OCI 方式缺少 `oci://` 前缀
+
+**解决**：
+- Docker 方式：`url: registry.cn-hangzhou.aliyuncs.com/...`（无前缀）
+- OCI 方式：`url: oci://registry.cn-hangzhou.cr.aliyuncs.com/...`（有前缀）
+
+### Q2: 配置不生效
+
+**错误**：插件已加载但未执行上报
+
+**原因**：`defaultConfigDisable: true` 且未配置 `matchRules`
+
+**解决**：
+```yaml
+spec:
+  defaultConfigDisable: false  # 启用默认配置
+  # 或配置 matchRules
+  matchRules:
+    - configDisable: false
+```
+
+### Q3: 找不到上报服务
+
+**错误**：`failed to call report API`
+
+**原因**：`reportServiceName` 配置的服务在 Higress 中不存在
+
+**解决**：
+```bash
+# 检查服务是否存在
+kubectl get svc -n <service-namespace> | grep <reportServiceName>
+
+# 使用正确的服务名
+reportServiceName: "existing-service-name"
+```
+
+### Q4: 路径匹配不正确
+
+**错误**：某些请求未被统计
+
+**原因**：`enable_path_suffixes` 配置过于严格
+
+**解决**：
+```yaml
+# 方式一：统计所有路径
+enable_path_suffixes:
+  - "*"
+
+# 方式二：放宽限制
+enable_path_suffixes:
+  - "/v1/"
+  - "/generate"
+```
+
+---
+
+## ==========================================
+## 监控和调试
+## ==========================================
+
+### 查看插件指标
+
+```bash
+# Higress 提供的插件相关指标
+kubectl exec -n higress-system <gateway-pod> -- curl -s localhost:15000/stats | grep wasm
+```
+
+### 启用调试日志
+
+```yaml
+# 在 Higress Gateway 的 Deployment 中添加
+spec:
+  template:
+    spec:
+      containers:
+      - name: higress-gateway
+        args:
+          - --log-level=debug
+```
+
+### 常用日志查询
+
+```bash
+# 查看所有 Wasm 插件日志
+kubectl logs -n higress-system <gateway-pod> | grep -i wasm
+
+# 查看 ai-statistics 日志
+kubectl logs -n higress-system <gateway-pod> | grep "ai-statistics"
+
+# 查看上报相关日志
+kubectl logs -n higress-system <gateway-pod> | grep "reporting token"
+
+# 查看错误日志
+kubectl logs -n higress-system <gateway-pod> | grep -i "error.*ai-statistics"
+```
+
+---
+
+**参考文档**：
+- [Wasm 插件镜像规范](https://higress.cn/docs/latest/user/wasm-image-spec/)
+- [自定义插件开发](https://higress.cn/docs/latest/plugins/custom/)
+- [插件使用说明](https://higress.cn/docs/latest/plugins/intro/)
+
+**最后更新**: 2026-01-13
+**版本**: 1.0.0

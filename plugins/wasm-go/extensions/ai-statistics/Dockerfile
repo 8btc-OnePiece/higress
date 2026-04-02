@@ -10,7 +10,7 @@ COPY main.wasm plugin.wasm
 # Wasm 插件镜像规范要求的元数据
 # 这些 Labels 帮助 Higress Console 正确识别和展示插件
 LABEL "higress-plugin.name"="ai-statistics"
-LABEL "higress-plugin.version"="2.0.0"
+LABEL "higress-plugin.version"="1.0.0"
 LABEL "higress-plugin.category"="custom"
 LABEL "higress-plugin.phase"="AUTHN"
 LABEL "higress-plugin.priority"="100"
@@ -24,7 +24,7 @@ LABEL "higress-plugin.icon-url"="https://img.alicdn.com/imgextra/i2/O1CN01z3z5xz
 LABEL "org.opencontainers.image.authors"="Higress Team"
 LABEL "org.opencontainers.image.description"="AI Statistics Plugin for Higress Gateway"
 LABEL "org.opencontainers.image.title"="ai-statistics"
-LABEL "org.opencontainers.image.version"="2.0.0"
+LABEL "org.opencontainers.image.version"="1.0.0"
 
 # Wasm 插件不需要进程，禁用健康检查
 HEALTHCHECK NONE

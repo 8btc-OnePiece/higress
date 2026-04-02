@@ -382,7 +382,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 	}
 
 	log.Debugf("[onStreamingResponseBody] provider=%s", activeProvider.GetProviderType())
-	log.Debugf("[onStreamingResponseBody] isLastChunk=%v chunk: %s", isLastChunk, string(chunk))
+	//log.Debugf("[onStreamingResponseBody] isLastChunk=%v chunk: %s", isLastChunk, string(chunk))
 
 	if handler, ok := activeProvider.(provider.StreamingResponseBodyHandler); ok {
 		apiName, _ := ctx.GetContext(provider.CtxKeyApiName).(provider.ApiName)

@@ -31,14 +31,50 @@ print_error() {
 
 # 检查参数
 if [ $# -lt 1 ]; then
-    echo "用法: $0 <插件名> [Dockerfile路径]"
-    echo "示例: $0 my-plugin"
-    echo "示例: $0 my-plugin ./Dockerfile.custom"
+    echo "用法: $0 <插件名> [插件目录路径] [Dockerfile路径]"
+    echo ""
+    echo "示例:"
+    echo "  # 从插件目录内执行"
+    echo "  $0 consumer-group-mapping"
+    echo ""
+    echo "  # 从 extensions 目录执行"
+    echo "  $0 consumer-group-mapping ./consumer-group-mapping"
+    echo ""
+    echo "  # 指定完整的插件目录路径"
+    echo "  $0 consumer-group-mapping /path/to/consumer-group-mapping"
+    echo ""
+    echo "  # 使用自定义 Dockerfile"
+    echo "  $0 consumer-group-mapping ./consumer-group-mapping ./consumer-group-mapping/Dockerfile.custom"
     exit 1
 fi
 
 PLUGIN_NAME=$1
-DOCKERFILE_PATH=${2:-"./Dockerfile"}
+PLUGIN_DIR=${2:-"./${PLUGIN_NAME}"}
+DOCKERFILE_PATH=${3:-"${PLUGIN_DIR}/Dockerfile"}
+
+# 如果插件目录是相对路径且不存在，尝试在当前目录的子目录中查找
+if [ ! -d "${PLUGIN_DIR}" ]; then
+    print_info "插件目录 ${PLUGIN_DIR} 不存在，尝试在当前目录查找..."
+    if [ -d "${PWD}/${PLUGIN_NAME}" ]; then
+        PLUGIN_DIR="${PWD}/${PLUGIN_NAME}"
+        print_success "找到插件目录: ${PLUGIN_DIR}"
+    else
+        print_error "无法找到插件目录: ${PLUGIN_NAME}"
+        print_info "请确认插件目录存在或提供正确的路径"
+        exit 1
+    fi
+fi
+
+# 获取插件目录的绝对路径
+PLUGIN_DIR=$(cd "${PLUGIN_DIR}" && pwd)
+
+# 设置 Dockerfile 路径
+if [ "${DOCKERFILE_PATH}" = "${PLUGIN_DIR}/Dockerfile" ] && [ ! -f "${DOCKERFILE_PATH}" ]; then
+    # 尝试在插件目录中查找 Dockerfile
+    if [ -f "${PLUGIN_DIR}/Dockerfile" ]; then
+        DOCKERFILE_PATH="${PLUGIN_DIR}/Dockerfile"
+    fi
+fi
 
 # 生成时间戳版本号
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
@@ -52,10 +88,15 @@ print_info "======================================"
 print_info "Higress 插件构建和推送脚本"
 print_info "======================================"
 print_info "插件名称: ${PLUGIN_NAME}"
+print_info "插件目录: ${PLUGIN_DIR}"
 print_info "版本号: ${IMAGE_TAG}"
 print_info "Dockerfile: ${DOCKERFILE_PATH}"
 print_info "SWR 仓库: ${SWR_REGISTRY}/${SWR_NAMESPACE}/${SWR_IMAGE_NAME}:${IMAGE_TAG}"
 print_info "======================================"
+
+# 切换到插件目录
+ORIGINAL_DIR=$(pwd)
+cd "${PLUGIN_DIR}"
 
 # 1. 清理旧的 WASM 文件
 print_info "步骤 1: 清理旧的 WASM 文件..."
@@ -68,39 +109,58 @@ fi
 
 # 2. 检查构建脚本
 print_info "步骤 2: 检查构建脚本..."
-if [ ! -f "./build.sh" ]; then
-    print_error "未找到 build.sh 脚本"
-    exit 1
-fi
+if [ -f "./build.sh" ]; then
+    BUILD_SCRIPT="./build.sh"
+    print_success "找到构建脚本: ${BUILD_SCRIPT}"
 
-# 3. 执行构建脚本
-print_info "步骤 3: 执行构建脚本..."
-if chmod +x ./build.sh; then
-    ./build.sh
-    if [ $? -eq 0 ]; then
-        print_success "构建脚本执行成功"
+    # 3. 执行构建脚本
+    print_info "步骤 3: 执行构建脚本..."
+    if chmod +x ./build.sh; then
+        ./build.sh
+        if [ $? -eq 0 ]; then
+            print_success "构建脚本执行成功"
+        else
+            print_error "构建脚本执行失败"
+            exit 1
+        fi
     else
-        print_error "构建脚本执行失败"
+        print_error "无法执行构建脚本"
         exit 1
     fi
-else
-    print_error "无法执行构建脚本"
-    exit 1
-fi
 
-# 4. 检查 WASM 文件是否生成
-print_info "步骤 4: 检查 WASM 文件..."
-if [ ! -f "main.wasm" ]; then
-    print_error "构建完成后未找到 main.wasm 文件"
-    exit 1
+    # 4. 检查 WASM 文件是否生成
+    print_info "步骤 4: 检查 WASM 文件..."
+    if [ ! -f "main.wasm" ]; then
+        print_error "构建完成后未找到 main.wasm 文件"
+        exit 1
+    fi
+    print_success "main.wasm 文件已生成"
+else
+    print_warning "未找到 build.sh 脚本"
+    print_info "检查是否已存在 main.wasm 文件..."
+
+    # 如果没有 build.sh，检查是否已经有 main.wasm
+    if [ -f "main.wasm" ]; then
+        print_success "找到现有的 main.wasm 文件，跳过构建步骤"
+    else
+        print_error "既没有 build.sh 脚本，也没有 main.wasm 文件"
+        print_info "请确保插件目录中包含 build.sh 或已编译的 main.wasm"
+        exit 1
+    fi
 fi
-print_success "main.wasm 文件已生成"
 
 # 5. 检查 Dockerfile
 print_info "步骤 5: 检查 Dockerfile..."
 if [ ! -f "${DOCKERFILE_PATH}" ]; then
-    print_error "未找到 Dockerfile: ${DOCKERFILE_PATH}"
-    exit 1
+    # 尝试在插件目录中查找 Dockerfile
+    if [ -f "./Dockerfile" ]; then
+        DOCKERFILE_PATH="./Dockerfile"
+        print_success "在插件目录中找到 Dockerfile: ${DOCKERFILE_PATH}"
+    else
+        print_error "未找到 Dockerfile: ${DOCKERFILE_PATH}"
+        print_info "请确保 Dockerfile 存在于插件目录中"
+        exit 1
+    fi
 fi
 
 # 6. 构建 Docker 镜像
@@ -154,5 +214,8 @@ if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
     docker rmi "${IMAGE_NAME}:${IMAGE_TAG}" "${FULL_SWR_IMAGE}"
     print_success "本地镜像已删除"
 fi
+
+# 切换回原始目录
+cd "${ORIGINAL_DIR}"
 
 print_success "脚本执行完成!"

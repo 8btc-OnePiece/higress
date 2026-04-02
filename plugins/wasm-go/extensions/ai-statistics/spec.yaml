@@ -8,7 +8,7 @@ info:
   x-description-i18n:
     en-US: Collect AI model token usage statistics and report to external API, recording input/output/total token count, model name, user identity and other key metrics.
   iconUrl: https://img.alicdn.com/imgextra/i2/O1CN01z3z5xz1iVZ2VCvtxL_!!6000000004429-2-tps-42-42.png
-  version: 2.0.0
+  version: 1.0.0
   contact:
     name: Higress Team
     url: http://higress.cn/

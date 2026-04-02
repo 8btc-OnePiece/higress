@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,34 +23,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const (
-	// Envoy log levels
-	LogLevelTrace = iota
-	LogLevelDebug
-	LogLevelInfo
-	LogLevelWarn
-	LogLevelError
-	LogLevelCritical
-)
-
 func main() {}
 
-func init() {
-	wrapper.SetCtx(
-		"ai-statistics",
-		wrapper.ParseConfig(parseConfig),
-		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
-		wrapper.ProcessRequestBody(onHttpRequestBody),
-		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
-		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
-		wrapper.ProcessResponseBody(onHttpResponseBody),
-		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](1000),
-		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](200*1024*1024),
-	)
-}
-
 const (
-	defaultMaxBodyBytes uint32 = 100 * 1024 * 1024
+	defaultMaxBodyBytes        uint32 = 100 * 1024 * 1024
+	defaultReportTimeout       int32  = 5000             // 5 seconds
+	maxStreamingBodyBufferSize int    = 10 * 1024 * 1024 // 10MB limit for streaming buffer
 	// Context consts
 	StatisticsRequestStartTime = "ai-statistics-request-start-time"
 	StatisticsFirstTokenTime   = "ai-statistics-first-token-time"
@@ -56,12 +39,38 @@ const (
 	ClusterName                = "cluster"
 	APIName                    = "api"
 	ConsumerKey                = "x-mse-consumer"
+	OriginalAPIKey             = "X-Original-Api-Key"
+	RequestID                  = "request_id"
 	RequestPath                = "request_path"
 	SkipProcessing             = "skip_processing"
 
 	// Session ID related
 	SessionID = "session_id"
 
+	// Envoy log levels
+	LogLevelTrace = iota
+	LogLevelDebug
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
+	LogLevelCritical
+)
+
+func init() {
+	wrapper.SetCtx(
+		"ai-statistics",
+		wrapper.ParseConfig(parseConfig),
+		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessRequestBody(onHttpRequestBody),
+		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
+		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
+		wrapper.ProcessResponseBody(onHttpResponseBody),
+		wrapper.WithRebuildAfterRequests[AIStatisticsConfig](200),
+		wrapper.WithRebuildMaxMemBytes[AIStatisticsConfig](100*1024*1024),
+	)
+}
+
+const (
 	// AI API Paths
 	PathOpenAIChatCompletions       = "/v1/chat/completions"
 	PathOpenAICompletions           = "/v1/completions"
@@ -132,13 +141,13 @@ const (
 	ToolCallsPathStreaming    = "choices.0.delta.tool_calls"
 
 	// Claude/Anthropic tool calls paths (streaming)
-	ClaudeEventType              = "type"
-	ClaudeContentBlockType       = "content_block.type"
-	ClaudeContentBlockID         = "content_block.id"
-	ClaudeContentBlockName       = "content_block.name"
-	ClaudeContentBlockInput      = "content_block.input"
-	ClaudeDeltaPartialJSON       = "delta.partial_json"
-	ClaudeIndex                  = "index"
+	ClaudeEventType         = "type"
+	ClaudeContentBlockType  = "content_block.type"
+	ClaudeContentBlockID    = "content_block.id"
+	ClaudeContentBlockName  = "content_block.name"
+	ClaudeContentBlockInput = "content_block.input"
+	ClaudeDeltaPartialJSON  = "delta.partial_json"
+	ClaudeIndex             = "index"
 
 	// Reasoning paths
 	ReasoningPathNonStreaming = "choices.0.message.reasoning_content"
@@ -154,10 +163,10 @@ func getDefaultAttributes() []Attribute {
 	return []Attribute{
 		// Extract complete conversation history from request body
 		{
-			Key:        "messages",
+			Key:         "messages",
 			ValueSource: RequestBody,
-			Value:      "messages",
-			ApplyToLog: true,
+			Value:       "messages",
+			ApplyToLog:  true,
 		},
 		// Built-in attributes (no value_source needed, will be auto-extracted)
 		{
@@ -259,10 +268,10 @@ func extractSessionId(customHeader string) string {
 
 // ToolCall represents a single tool call in the response
 type ToolCall struct {
-	Index    int                    `json:"index,omitempty"`
-	ID       string                 `json:"id,omitempty"`
-	Type     string                 `json:"type,omitempty"`
-	Function ToolCallFunction       `json:"function,omitempty"`
+	Index    int              `json:"index,omitempty"`
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function,omitempty"`
 }
 
 // ToolCallFunction represents the function details in a tool call
@@ -297,7 +306,7 @@ func extractStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuffer) *S
 
 		for _, tcResult := range toolCallsResult.Array() {
 			index := int(tcResult.Get("index").Int())
-			
+
 			// Get or create tool call entry
 			tc, exists := buffer.ToolCalls[index]
 			if !exists {
@@ -350,10 +359,10 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			contentBlockType := gjson.GetBytes(chunk, ClaudeContentBlockType)
 			if contentBlockType.Exists() && contentBlockType.String() == "tool_use" {
 				index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
-				
+
 				// Create tool call entry
 				tc := &ToolCall{Index: index}
-				
+
 				// Extract id and name
 				if id := gjson.GetBytes(chunk, ClaudeContentBlockID).String(); id != "" {
 					tc.ID = id
@@ -362,11 +371,11 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 					tc.Function.Name = name
 				}
 				tc.Type = "tool_use"
-				
+
 				buffer.ToolCalls[index] = tc
 				buffer.InToolBlock[index] = true
 				buffer.ArgumentsBuffer[index] = ""
-				
+
 				// Try to extract initial input if present
 				if input := gjson.GetBytes(chunk, ClaudeContentBlockInput); input.Exists() {
 					if inputMap, ok := input.Value().(map[string]interface{}); ok {
@@ -393,7 +402,7 @@ func extractClaudeStreamingToolCalls(data []byte, buffer *StreamingToolCallsBuff
 			index := int(gjson.GetBytes(chunk, ClaudeIndex).Int())
 			if buffer.InToolBlock[index] {
 				buffer.InToolBlock[index] = false
-				
+
 				// Parse accumulated arguments and set them
 				if tc, exists := buffer.ToolCalls[index]; exists {
 					tc.Function.Arguments = buffer.ArgumentsBuffer[index]
@@ -428,6 +437,26 @@ func getToolCallsFromBuffer(buffer *StreamingToolCallsBuffer) []ToolCall {
 	return result
 }
 
+// TokenUsageReportRequest represents the request body for token usage reporting
+type TokenUsageReportRequest struct {
+	RequestId   string `json:"requestId"`   // 请求唯一ID，格式：{userKey}-{timestamp}-{random}
+	Model       string `json:"model"`       // 模型名称
+	UserKey     string `json:"userKey"`     // 用户Key（从X-Original-Api-Key header获取）
+	InputToken  int32  `json:"inputToken"`  // 输入token数
+	OutputToken int32  `json:"outputToken"` // 输出token数
+	TotalToken  int32  `json:"totalToken"`  // 总token数
+	Duration    int64  `json:"duration"`    // 耗时（毫秒）
+	Timestamp   int64  `json:"timestamp"`   // 时间戳（毫秒）
+}
+
+// TokenUsageReportResponse represents the response from the reporting API
+type TokenUsageReportResponse struct {
+	Success   bool   `json:"success"`   // 是否成功
+	Message   string `json:"message"`   // 响应消息
+	RequestID string `json:"requestId"` // 请求ID
+	Duplicate bool   `json:"duplicate"` // 是否重复请求
+}
+
 // TracingSpan is the tracing span configuration.
 type Attribute struct {
 	Key                string `json:"key"`
@@ -460,6 +489,12 @@ type AIStatisticsConfig struct {
 	enableContentTypes []string
 	// Session ID header name (if configured, takes priority over default headers)
 	sessionIdHeader string
+
+	// Token usage report configuration
+	reportClient      wrapper.HttpClient
+	reportServiceName string
+	reportApiUrl      string
+	reportTimeout     int32
 }
 
 func generateMetricName(route, cluster, model, consumer, metricName string) string {
@@ -468,6 +503,14 @@ func generateMetricName(route, cluster, model, consumer, metricName string) stri
 
 func getRouteName() (string, error) {
 	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
+		return "-", err
+	} else {
+		return string(raw), nil
+	}
+}
+
+func getRequestID() (string, error) {
+	if raw, err := proxywasm.GetProperty([]string{"request", "id"}); err != nil {
 		return "-", err
 	} else {
 		return string(raw), nil
@@ -689,6 +732,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) ty
 	if requestPath, _ := proxywasm.GetHttpRequestHeader(":path"); requestPath != "" {
 		ctx.SetContext(RequestPath, requestPath)
 	}
+	if requestID, _ := getRequestID(); requestID != "" && requestID != "-" {
+		ctx.SetContext(RequestID, requestID)
+	}
 	if consumer, _ := proxywasm.GetHttpRequestHeader(ConsumerKey); consumer != "" {
 		ctx.SetContext(ConsumerKey, consumer)
 	}
@@ -795,6 +841,14 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config AIStatisticsConfig) t
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, data []byte, endOfStream bool) []byte {
+	// Ensure cleanup only happens at the end of streaming or when skipping
+	defer func() {
+		// Cleanup when stream ends OR when skipping processing
+		if endOfStream || ctx.GetBoolContext(SkipProcessing, false) {
+			cleanupContext(ctx)
+		}
+	}()
+
 	// Check if processing should be skipped
 	if ctx.GetBoolContext(SkipProcessing, false) {
 		return data
@@ -804,10 +858,22 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 	if config.shouldBufferStreamingBody {
 		streamingBodyBuffer, ok := ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
 		if !ok {
-			streamingBodyBuffer = data
+			streamingBodyBuffer = make([]byte, 0, 1024) // Start with small capacity
+		}
+
+		// Check buffer size limit before appending to prevent uncontrolled growth
+		currentSize := len(streamingBodyBuffer)
+		newSize := currentSize + len(data)
+
+		if newSize > maxStreamingBodyBufferSize {
+			log.Warnf("Streaming body buffer exceeds limit (%d bytes), clearing buffer", newSize)
+			// Clear the buffer to prevent memory accumulation and immediately free the old buffer
+			streamingBodyBuffer = make([]byte, 0, 1024)
 		} else {
+			// Use append with potentially larger data chunks
 			streamingBodyBuffer = append(streamingBodyBuffer, data...)
 		}
+
 		ctx.SetContext(CtxStreamingBodyBuffer, streamingBodyBuffer)
 	}
 
@@ -843,7 +909,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 			setSpanAttribute(ArmsModelName, usage.Model)
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -864,6 +930,8 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 		var streamingBodyBuffer []byte
 		if config.shouldBufferStreamingBody {
 			streamingBodyBuffer, _ = ctx.GetContext(CtxStreamingBodyBuffer).([]byte)
+			// Immediately clear the buffer after use to free memory
+			ctx.SetContext(CtxStreamingBodyBuffer, nil)
 		}
 		setAttributeBySource(ctx, config, ResponseStreamingBody, streamingBodyBuffer)
 
@@ -878,10 +946,14 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config AIStatisticsConfig, dat
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body []byte) types.Action {
-	// Check if processing should be skipped
+	// Check if processing should be skipped first
 	if ctx.GetBoolContext(SkipProcessing, false) {
+		cleanupContext(ctx)
 		return types.ActionContinue
 	}
+
+	// For normal processing, ensure cleanup at the end
+	defer cleanupContext(ctx)
 
 	// Get requestStartTime from http context
 	requestStartTime, _ := ctx.GetContext(StatisticsRequestStartTime).(int64)
@@ -907,7 +979,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config AIStatisticsConfig, body
 			setSpanAttribute(ArmsInputToken, usage.InputToken)
 			setSpanAttribute(ArmsOutputToken, usage.OutputToken)
 			setSpanAttribute(ArmsTotalToken, usage.TotalToken)
-			
+
 			// Set token details to context for later use in attributes
 			if len(usage.InputTokenDetails) > 0 {
 				ctx.SetContext(tokenusage.CtxKeyInputTokenDetails, usage.InputTokenDetails)
@@ -975,7 +1047,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 		if (value == nil || value == "") && attribute.DefaultValue != "" {
 			value = attribute.DefaultValue
 		}
-		
+
 		// Format value for logging/span
 		var formattedValue interface{}
 		switch v := value.(type) {
@@ -994,7 +1066,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 				formattedValue = fmt.Sprint(value)[:config.valueLengthLimit/2] + " [truncated] " + fmt.Sprint(value)[len(fmt.Sprint(value))-config.valueLengthLimit/2:]
 			}
 		}
-		
+
 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
 		if attribute.ApplyToLog {
 			if attribute.AsSeparateLogField {
@@ -1124,7 +1196,7 @@ func getBuiltinAttributeFallback(ctx wrapper.HttpContext, config AIStatisticsCon
 			// Also try Claude format (both formats can be checked)
 			buffer = extractClaudeStreamingToolCalls(body, buffer)
 			ctx.SetContext(CtxStreamingToolCallsBuffer, buffer)
-			
+
 			// Also set tool_calls to user attributes so they appear in ai_log
 			toolCalls := getToolCallsFromBuffer(buffer)
 			if len(toolCalls) > 0 {
@@ -1403,4 +1475,33 @@ func convertToUInt(val interface{}) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// cleanupContext cleans up the context data to free memory
+func cleanupContext(ctx wrapper.HttpContext) {
+	// Clear all context data to prevent memory leaks
+	ctx.SetContext(CtxStreamingBodyBuffer, nil)
+	ctx.SetContext(StatisticsRequestStartTime, nil)
+	ctx.SetContext(StatisticsFirstTokenTime, nil)
+	ctx.SetContext(RouteName, nil)
+	ctx.SetContext(ClusterName, nil)
+	ctx.SetContext(RequestID, nil)
+	ctx.SetContext(ConsumerKey, nil)
+	ctx.SetContext(RequestPath, nil)
+
+	// Clear token usage context attributes
+	ctx.SetContext(tokenusage.CtxKeyModel, nil)
+	ctx.SetContext(tokenusage.CtxKeyInputToken, nil)
+	ctx.SetContext(tokenusage.CtxKeyOutputToken, nil)
+	ctx.SetContext(tokenusage.CtxKeyTotalToken, nil)
+
+	// Clear all user attributes to prevent memory leaks in high concurrency scenarios
+	// These are set via ctx.SetUserAttribute() and can accumulate over time
+	ctx.SetUserAttribute(APIName, nil)
+	ctx.SetUserAttribute(ResponseType, nil)
+	ctx.SetUserAttribute(ChatID, nil)
+	ctx.SetUserAttribute(LLMFirstTokenDuration, nil)
+	ctx.SetUserAttribute(LLMServiceDuration, nil)
+	ctx.SetUserAttribute(ChatRound, nil)
+	ctx.SetUserAttribute(SessionID, nil)
 }

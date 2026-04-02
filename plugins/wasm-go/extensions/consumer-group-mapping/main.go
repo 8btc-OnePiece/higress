@@ -35,7 +35,7 @@ func init() {
 		"consumer-group-mapping",
 		wrapper.ParseConfigBy(parseConfig),
 		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
-		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
+		//wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
 	)
 }
 
