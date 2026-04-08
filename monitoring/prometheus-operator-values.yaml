@@ -1,0 +1,92 @@
+# Prometheus Operator 配置文件
+# 用于安装 Prometheus Operator 及其组件
+
+# Prometheus Operator 配置
+prometheus:
+  # Prometheus 实例配置
+  prometheusSpec:
+    # 服务监控器选择器
+    serviceMonitorSelector:
+      matchLabels:
+        release: prometheus
+
+    podMonitorSelector:
+      matchLabels:
+        release: prometheus
+
+    # 资源配置
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    # 存储配置
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+    # 持久时间
+    retention: 30d
+
+    # 告警管理器配置
+    alertingEndpoints:
+      - namespace: monitoring
+        name: alertmanager-operated
+        port: web
+
+# Alertmanager 配置
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+# Grafana 配置
+grafana:
+  enabled: true
+  adminPassword: admin
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # 数据源配置
+  datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://prometheus-operated.monitoring.svc.cluster.local:9090
+      access: proxy
+      isDefault: true
+
+# Node Exporter 配置（用于监控节点指标）
+nodeExporter:
+  enabled: true
+
+# Kube-State-Metrics 配置
+kubeStateMetrics:
+  enabled: true

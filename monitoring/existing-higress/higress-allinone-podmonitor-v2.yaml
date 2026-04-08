@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: higress-allinone
+  namespace: agent
+  labels:
+    app: higress-allinone
+    release: prometheus
+spec:
+  podMetricsEndpoints:
+  - interval: 30s
+    path: /stats/prometheus
+    targetPort: 15020  # 直接使用端口号，而不是端口名
+    scheme: http
+    scrapeTimeout: 10s
+    relabelings:
+    - replacement: higress-allinone
+      targetLabel: instance
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+  selector:
+    matchLabels:
+      app: higress-allinone

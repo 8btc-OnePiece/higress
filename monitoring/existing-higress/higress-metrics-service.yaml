@@ -1,0 +1,20 @@
+# Higress All-in-One Metrics Service
+# 暴露 Higress all-in-one Pod 的 metrics 端口供 Prometheus 采集
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: higress-allinone-metrics
+  namespace: agent
+  labels:
+    app: higress-allinone
+    component: metrics
+spec:
+  selector:
+    app: higress-allinone
+  ports:
+    - name: stats-prom
+      port: 15020
+      targetPort: 15020
+      protocol: TCP
+  type: ClusterIP

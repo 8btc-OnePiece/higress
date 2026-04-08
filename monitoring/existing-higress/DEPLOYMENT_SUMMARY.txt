@@ -1,0 +1,232 @@
+================================================================================
+Higress All-in-One 内存监控配置 - 部署总结
+================================================================================
+
+环境信息：
+  - KUBECONFIG: /Users/xiaodian/.kube/huawei-pref-kubeconfig.yaml
+  - 命名空间: agent
+  - Higress Pod: higress-allinone-*
+  - Metrics 端口: 15020
+
+================================================================================
+📦 已创建的配置文件：
+================================================================================
+
+1. deploy-monitoring.sh          # 一键部署脚本 ⭐
+2. higress-metrics-service.yaml  # Metrics Service
+3. higress-allinone-podmonitor.yaml  # PodMonitor 配置
+4. higress-allinone-dashboard.json   # Grafana Dashboard
+5. README.md                      # 完整文档
+6. QUICKSTART.md                  # 快速开始
+
+================================================================================
+🚀 部署步骤（一键部署）
+================================================================================
+
+cd /Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress
+./deploy-monitoring.sh
+
+脚本会自动完成：
+  ✅ 检查 Higress Pod 状态
+  ✅ 验证 metrics 端点 (15020)
+  ✅ 安装 Prometheus Operator
+  ✅ 创建 Metrics Service
+  ✅ 配置 PodMonitor
+  ✅ 应用告警规则
+  ✅ 验证配置
+
+================================================================================
+📊 访问监控
+================================================================================
+
+Grafana Dashboard:
+-------------------------------------------
+# 设置 KUBECONFIG
+export KUBECONFIG=/Users/xiaodian/.kube/huawei-pref-kubeconfig.yaml
+
+# 端口转发
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+
+# 浏览器访问
+open http://localhost:3000
+用户名: admin
+密码: admin
+
+# 导入 Dashboard
+点击 "+" → "Import" → Upload "higress-allinone-dashboard.json"
+
+Prometheus:
+-------------------------------------------
+# 端口转发
+kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+
+# 浏览器访问
+open http://localhost:9090
+
+================================================================================
+📈 关键内存查询（PromQL）
+================================================================================
+
+Higress All-in-One 使用 Istio Agent 指标：
+
+1. 已分配内存
+-------------------------------------------
+istio_agent_go_memstats_alloc_bytes{namespace="agent"}
+
+2. Heap 内存使用
+-------------------------------------------
+istio_agent_go_memstats_heap_inuse_bytes{namespace="agent"}
+
+3. 内存分配速率
+-------------------------------------------
+rate(istio_agent_go_memstats_alloc_bytes_total{namespace="agent"}[5m])
+
+4. Goroutines 数量
+-------------------------------------------
+istio_agent_go_goroutines{namespace="agent"}
+
+5. GC 统计
+-------------------------------------------
+rate(istio_agent_go_gc_duration_seconds_sum{namespace="agent"}[5m])
+
+6. Stack 内存
+-------------------------------------------
+istio_agent_go_memstats_stack_inuse_bytes{namespace="agent"}
+
+================================================================================
+⚠️  告警规则
+================================================================================
+
+级别  | 告警名称                           | 触发条件
+------|-----------------------------------|------------------------
+WARNING  | HigressGatewayHighMemoryUsage    | 内存使用率 > 80%
+CRITICAL | HigressGatewayMemoryNearLimit   | 内存使用率 > 90%
+CRITICAL | HigressGatewayPotentialOOM      | 预计1小时内OOM
+WARNING  | HigressGatewayMemoryGrowing     | 持续增长2小时
+WARNING  | HigressMemorySpike              | 15分钟内增长>20%
+WARNING  | HigressHighGoHeapUsage          | Go Heap > 80%
+WARNING  | HigressHighGCFrequency          | GC 频率 > 10次/秒
+
+注意：告警规则已自动适配 all-in-one 环境（命名空间: agent）
+
+================================================================================
+✅ 验证步骤
+================================================================================
+
+1. 检查 Metrics Service
+-------------------------------------------
+kubectl get svc -n agent higress-allinone-metrics
+
+# 预期输出:
+# NAME                        TYPE        CLUSTER-IP       PORT(S)     AGE
+# higress-allinone-metrics    ClusterIP   10.102.123.45    15020/TCP   5m
+
+2. 检查 PodMonitor
+-------------------------------------------
+kubectl get podmonitor -n agent
+
+# 预期输出:
+# NAME                   AGE
+# higress-allinone       5m
+
+3. 验证 Prometheus Targets
+-------------------------------------------
+# 访问 Prometheus UI → Status → Targets
+# 应该看到 higress-allinone (UP)
+
+4. 测试 metrics 端点
+-------------------------------------------
+kubectl exec -n agent \
+  $(kubectl get pod -n agent -l app=higress-allinone -o jsonpath='{.items[0].metadata.name}') \
+  -- curl -s http://localhost:15020/stats/prometheus | head -5
+
+5. 查询指标验证
+-------------------------------------------
+# 在 Prometheus UI 执行:
+up{namespace="agent"}
+
+# 应该返回值为 1
+
+================================================================================
+🔧 故障排查
+================================================================================
+
+问题 1: Metrics 端点无法访问
+-------------------------------------------
+# 检查 15020 端口是否监听
+kubectl exec -n agent \
+  $(kubectl get pod -n agent -l app=higress-allinone -o jsonpath='{.items[0].metadata.name}') \
+  -- netstat -tlnp | grep 15020
+
+# 应该看到:
+# tcp        0      0 0.0.0.0:15020          0.0.0.0:*           LISTEN  XXX/pilot-agent
+
+问题 2: PodMonitor 无数据
+-------------------------------------------
+# 检查 Pod 标签
+kubectl get pod -n agent -l app=higress-allinone --show-labels
+
+# 检查 PodMonitor 配置
+kubectl describe podmonitor higress-allinone -n agent
+
+问题 3: Prometheus Targets 显示 Down
+-------------------------------------------
+# 检查 Service endpoints
+kubectl get endpoints -n agent higress-allinone-metrics
+
+# 从 Prometheus Pod 测试连接
+kubectl exec -n monitoring \
+  $(kubectl get pod -n monitoring -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}') \
+  -- curl -s http://higress-allinone-metrics.agent.svc.cluster.local:15020/stats/prometheus | head -5
+
+================================================================================
+📞 获取帮助
+================================================================================
+
+文档:
+  - 快速开始: cat QUICKSTART.md
+  - 完整文档: cat README.md
+
+日志:
+  - Higress: kubectl logs -n agent -l app=higress-allinone
+  - Prometheus: kubectl logs -n monitoring prometheus-kube-prometheus-prometheus-0
+
+配置检查:
+  - Service: kubectl describe svc -n agent higress-allinone-metrics
+  - PodMonitor: kubectl describe podmonitor -n agent higress-allinone
+  - Higress Pods: kubectl describe pod -n agent -l app=higress-allinone
+
+================================================================================
+📝 关键差异说明
+================================================================================
+
+Higress All-in-One vs 标准部署：
+
+1. 指标来源
+   - All-in-One: istio_agent_* 指标（Istio Pilot Agent）
+   - 标准部署: container_memory_* 指标（cAdvisor）
+
+2. Metrics 端口
+   - All-in-One: 15020 (pilot-agent)
+   - 标准部署: 15020/15021 (Envoy)
+
+3. Pod 名称
+   - All-in-One: higress-allinone-*
+   - 标准部署: higress-gateway-*, higress-controller-*
+
+4. 命名空间
+   - 您的环境: agent
+   - 标准部署: higress-system
+
+================================================================================
+📚 相关资源
+================================================================================
+
+- Higress 官方文档: https://higress.io/docs/
+- Prometheus Operator: https://prometheus-operator.dev/
+- Istio 监控: https://istio.io/latest/docs/reference/config/metrics/
+- Go Runtime Metrics: https://github.com/prometheus/client_golang
+
+================================================================================
+配置完成！Happy Monitoring! 🎉
+================================================================================

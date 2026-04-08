@@ -1,0 +1,32 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: higress-allinone
+  namespace: agent
+  labels:
+    app: higress-allinone
+    release: prometheus
+spec:
+  podMetricsEndpoints:
+  - interval: 30s
+    path: /stats/prometheus
+    port: stats-prom  # 这个端口名来自 Service，不是 Pod
+    scheme: http
+    scrapeTimeout: 10s
+    relabelings:
+    # 使用 Service IP 而不是 Pod IP
+    - sourceLabels: [__address__]
+      targetLabel: __address__
+      replacement: higress-allinone-metrics.agent.svc.cluster.local:15020
+    # 添加实例标签
+    - replacement: higress-allinone
+      targetLabel: instance
+    # 添加 Pod 名称
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    # 添加命名空间
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+  selector:
+    matchLabels:
+      app: higress-allinone

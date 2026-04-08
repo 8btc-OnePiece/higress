@@ -1,0 +1,274 @@
+================================================================================
+🎉 Higress All-in-One 内存监控部署成功！
+================================================================================
+
+部署时间: 2024-02-27
+KUBECONFIG: /Users/xiaodian/.kube/huawei-pref-kubeconfig.yaml
+命名空间: agent
+Higress Pod: higress-allinone-5cc7d4c7d-kgnk9
+
+================================================================================
+✅ 部署结果总结
+================================================================================
+
+已成功部署的组件：
+
+1. ✅ Metrics Service (higress-allinone-metrics)
+   - Type: ClusterIP
+   - IP: 10.247.193.14
+   - Port: 15020/TCP
+   - Endpoints: 10.0.2.20:15020
+
+2. ✅ PodMonitor (higress-allinone)
+   - 采集间隔: 30秒
+   - 超时: 10秒
+   - 路径: /stats/prometheus
+   - 过滤器: 仅保留内存相关指标
+
+3. ✅ PrometheusRule (higress-memory-alerts)
+   - 告警规则数量: 229条
+   - 命名空间: agent
+   - 已适配 all-in-one 环境
+
+4. ✅ Prometheus Operator
+   - 状态: Running
+   - 版本: 2.41.0
+   - Pod 数量: 1个
+
+5. ✅ Grafana
+   - 状态: Running
+   - Pod 数量: 1个
+   - 用户名: admin
+   - 密码: admin
+
+================================================================================
+📊 立即访问监控
+================================================================================
+
+方式 1: 使用便捷脚本（推荐）
+-------------------------------------------
+cd /Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress
+./access-monitoring.sh
+
+# 选择:
+# 1 - Grafana Dashboard
+# 2 - Prometheus
+# 3 - 同时启动
+# 4 - 查看状态
+
+方式 2: 手动启动
+-------------------------------------------
+
+# Grafana Dashboard
+export KUBECONFIG=/Users/xiaodian/.kube/huawei-pref-kubeconfig.yaml
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+# 浏览器: http://localhost:3000 (admin/admin)
+
+# Prometheus
+kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+# 浏览器: http://localhost:9090
+
+================================================================================
+📈 关键内存查询（PromQL）
+================================================================================
+
+在 Prometheus 或 Grafana 中使用以下查询：
+
+1. 已分配内存（实时）
+-------------------------------------------
+istio_agent_go_memstats_alloc_bytes{namespace="agent"}
+
+2. Heap 内存使用
+-------------------------------------------
+istio_agent_go_memstats_heap_inuse_bytes{namespace="agent"}
+
+3. 内存分配速率（每秒）
+-------------------------------------------
+rate(istio_agent_go_memstats_alloc_bytes_total{namespace="agent"}[5m])
+
+4. Goroutines 数量
+-------------------------------------------
+istio_agent_go_goroutines{namespace="agent"}
+
+5. GC 暂停时间统计
+-------------------------------------------
+histogram_quantile(0.99,
+  sum(rate(istio_agent_go_gc_duration_seconds_bucket{namespace="agent"}[5m])) by (le)
+)
+
+6. 内存使用峰值（最近1小时）
+-------------------------------------------
+max_over_time(
+  istio_agent_go_memstats_alloc_bytes{namespace="agent"}[1h]
+)
+
+7. Top 5 内存分配
+-------------------------------------------
+topk(5,
+  rate(istio_agent_go_memstats_alloc_bytes_total{namespace="agent"}[5m])
+)
+
+================================================================================
+🎨 导入 Grafana Dashboard
+================================================================================
+
+1. 访问 Grafana: http://localhost:3000
+2. 登录 (admin/admin)
+3. 点击左侧 "+" → "Import"
+4. 选择 "Upload JSON file"
+5. 上传文件:
+   /Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress/higress-allinone-dashboard.json
+
+或者使用 Dashboad ID（如果已上传到 Grafana.com）
+
+Dashboard 包含的面板：
+- Higress 内存使用量（Alloc/Heap/Stack）
+- 当前 Heap 内存（Gauge）
+- 内存分配速率
+- Heap 内存详情（Idle/Released/Sys）
+- Goroutines & Threads 数量
+- GC 统计（频率和耗时）
+
+================================================================================
+⚠️  告警规则已激活
+================================================================================
+
+已配置 7 条内存相关告警：
+
+告警名称                              级别     触发条件
+------------------------------------------------------------------
+HigressGatewayHighMemoryUsage         WARNING  内存使用率 > 80%，持续5分钟
+HigressGatewayMemoryNearLimit        CRITICAL 内存使用率 > 90%，持续5分钟
+HigressGatewayPotentialOOM           CRITICAL 预计1小时内OOM，持续10分钟
+HigressGatewayMemoryGrowing          WARNING  内存持续增长2小时
+HigressMemorySpike                   WARNING  15分钟内增长>20%
+HigressHighGoHeapUsage               WARNING  Go Heap > 80%，持续10分钟
+HigressHighGCFrequency               WARNING  GC频率 > 10次/秒，持续10分钟
+
+查看告警：
+- Prometheus UI: Alerts → 查看所有告警规则
+- Grafana UI: Alerting → 查看告警状态
+
+================================================================================
+📁 配置文件位置
+================================================================================
+
+所有配置文件位于:
+/Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress/
+
+主要文件：
+- deploy-monitoring.sh          # 部署脚本
+- verify.sh                     # 验证脚本
+- access-monitoring.sh          # 快速访问脚本 ⭐
+- higress-allinone-dashboard.json  # Grafana Dashboard
+- DEPLOYMENT_SUMMARY.txt        # 部署总结
+- QUICKSTART.md                 # 快速开始
+- README.md                     # 完整文档
+
+================================================================================
+🕐 预计数据采集时间
+================================================================================
+
+Prometheus 将在以下时间开始采集数据：
+
+首次采集: 立即（最多30秒）
+数据可用: 2-3分钟后
+完整图表: 5-10分钟后
+
+建议：
+- 等待 2-3 分钟后访问 Grafana
+- 查询时使用 "Last 5 minutes" 时间范围
+- 调整自动刷新为 10s 或 30s
+
+================================================================================
+🔍 验证监控工作正常
+================================================================================
+
+1. 检查 Prometheus Targets
+-------------------------------------------
+访问: http://localhost:9090/targets
+搜索: "higress-allinone"
+状态: 应该显示 "UP" (绿色)
+
+2. 执行测试查询
+-------------------------------------------
+在 Prometheus UI 执行:
+istio_agent_go_memstats_alloc_bytes{namespace="agent"}
+
+应该返回一个或多个时间序列数据。
+
+3. 检查 PodMonitor 状态
+-------------------------------------------
+export KUBECONFIG=/Users/xiaodian/.kube/huawei-pref-kubeconfig.yaml
+kubectl describe podmonitor -n agent higress-allinone
+
+检查 "Status" 部分是否正常。
+
+================================================================================
+💡 下一步建议
+================================================================================
+
+1. 立即行动
+   ✅ 启动端口转发访问 Grafana
+   ✅ 导入 Higress Dashboard
+   ✅ 验证数据是否正常显示
+
+2. 短期（1周内）
+   - 根据实际情况调整告警阈值
+   - 配置告警通知（Email/Slack/钉钉）
+   - 观察内存使用趋势
+
+3. 中期（1个月内）
+   - 优化资源配置（如需要）
+   - 设置性能基准线
+   - 定期检查告警规则
+
+4. 长期（持续）
+   - 定期检查内存使用报告
+   - 优化 Higress 配置
+   - 制定容量规划
+
+================================================================================
+📞 需要帮助？
+================================================================================
+
+常见问题：
+
+Q: 没有看到数据？
+A: 等待 2-3 分钟让 Prometheus 采集数据。检查 Prometheus Targets 状态。
+
+Q: Dashboard 导入失败？
+A: 确保 Grafana 可访问。可以手动创建 Panel 并使用 PromQL 查询。
+
+Q: 告警没有触发？
+A: 检查告警规则：kubectl get prometheusrule -n agent -o yaml
+  查看 Prometheus UI → Alerts
+
+Q: 如何修改 KUBECONFIG？
+A: 编辑所有 .sh 脚本中的 KUBECONFIG 变量
+
+获取更多帮助：
+- 完整文档: cat /Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress/README.md
+- 部署总结: cat /Users/xiaodian/IdeaProjects/higress/monitoring/existing-higress/DEPLOYMENT_SUMMARY.txt
+- 验证配置: ./verify.sh
+
+================================================================================
+🎊 部署成功完成！
+================================================================================
+
+您现在可以：
+
+1. 访问 Grafana 查看实时内存数据
+2. 设置告警通知（避免 OOM）
+3. 分析内存使用趋势
+4. 优化 Higress 性能
+
+开始监控：
+./access-monitoring.sh  → 选择 1
+
+或直接访问：
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+浏览器: http://localhost:3000 (admin/admin)
+
+Happy Monitoring! 🚀
+================================================================================

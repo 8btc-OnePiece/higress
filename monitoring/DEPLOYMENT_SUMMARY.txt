@@ -1,0 +1,231 @@
+================================================================================
+Higress Prometheus 内存监控配置 - 部署总结
+================================================================================
+
+📦 已创建的配置文件：
+================================================================================
+
+1. 安装脚本
+   ├── setup-higress-monitoring.sh          # 一键部署脚本 ⭐
+   └── install-prometheus-operator.sh      # Prometheus Operator 安装
+
+2. 配置文件
+   ├── prometheus-operator-values.yaml     # Prometheus Helm values
+   └── higress-values-with-metrics.yaml    # Higress 监控配置
+
+3. PodMonitor
+   ├── higress-gateway-podmonitor.yaml     # Gateway 监控
+   └── higress-controller-podmonitor.yaml  # Controller 监控
+
+4. Dashboard & 告警
+   ├── higress-memory-dashboard.json       # Grafana Dashboard
+   └── higress-memory-alerts.yaml          # 告警规则
+
+5. 文档
+   ├── 00-INDEX.md                         # 文档索引
+   ├── QUICKSTART.md                       # 快速开始 ⭐
+   └── README.md                           # 完整文档
+
+================================================================================
+🚀 部署步骤（3种方式）
+================================================================================
+
+方式 1: 一键部署（推荐）⭐
+-------------------------------------------
+cd /Users/xiaodian/IdeaProjects/higress/monitoring
+./setup-higress-monitoring.sh
+
+方式 2: 手动部署
+-------------------------------------------
+# 1. 安装 Prometheus Operator
+./install-prometheus-operator.sh
+
+# 2. 应用 PodMonitor
+kubectl apply -f higress-gateway-podmonitor.yaml
+kubectl apply -f higress-controller-podmonitor.yaml
+
+# 3. 更新 Higress
+cd /Users/xiaodian/IdeaProjects/higress/helm/core
+helm upgrade higress . \
+  --namespace higress-system \
+  --values ../monitoring/higress-values-with-metrics.yaml
+
+# 4. 应用告警规则
+kubectl apply -f ../monitoring/higress-memory-alerts.yaml
+
+方式 3: 仅配置 Higress（如果已有 Prometheus）
+-------------------------------------------
+kubectl apply -f higress-gateway-podmonitor.yaml
+kubectl apply -f higress-controller-podmonitor.yaml
+
+================================================================================
+📊 访问监控
+================================================================================
+
+Grafana Dashboard:
+-------------------------------------------
+# 端口转发
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+
+# 访问
+浏览器打开: http://localhost:3000
+用户名: admin
+密码: admin
+
+# 查找 Higress Dashboard
+搜索 "Higress Memory Monitoring"
+
+Prometheus:
+-------------------------------------------
+# 端口转发
+kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+
+# 访问
+浏览器打开: http://localhost:9090
+
+================================================================================
+📈 关键内存查询（PromQL）
+================================================================================
+
+1. Gateway 内存使用量
+-------------------------------------------
+container_memory_working_set_bytes{
+  namespace="higress-system",
+  pod=~"higress-gateway.*"
+}
+
+2. 内存使用率
+-------------------------------------------
+rate(container_memory_working_set_bytes{
+  namespace="higress-system",
+  pod=~"higress-gateway.*"
+}[5m]) / container_spec_memory_limit_bytes{
+  namespace="higress-system",
+  pod=~"higress-gateway.*"
+} * 100
+
+3. Go Heap 内存
+-------------------------------------------
+go_memstats_heap_inuse_bytes{
+  namespace="higress-system",
+  pod=~"higress-gateway.*"
+}
+
+4. 内存使用趋势
+-------------------------------------------
+rate(container_memory_working_set_bytes{
+  namespace="higress-system",
+  pod=~"higress-gateway.*"
+}[5m])
+
+================================================================================
+⚠️  告警规则
+================================================================================
+
+级别  | 告警名称                           | 触发条件
+------|-----------------------------------|------------------------
+WARNING  | HigressGatewayHighMemoryUsage    | 内存使用率 > 80%
+CRITICAL | HigressGatewayMemoryNearLimit   | 内存使用率 > 90%
+CRITICAL | HigressGatewayPotentialOOM      | 预计1小时内OOM
+WARNING  | HigressGatewayMemoryGrowing     | 持续增长2小时
+WARNING  | HigressMemorySpike              | 15分钟内增长>20%
+WARNING  | HigressHighGoHeapUsage          | Go Heap > 80%
+WARNING  | HigressHighGCFrequency          | GC 频率 > 10次/秒
+
+================================================================================
+✅ 验证步骤
+================================================================================
+
+1. 检查 PodMonitor
+-------------------------------------------
+kubectl get podmonitor -n higress-system
+
+# 预期输出:
+# NAME                    AGE
+# higress-gateway         5m
+# higress-controller      5m
+
+2. 检查 Prometheus Rule
+-------------------------------------------
+kubectl get prometheusrule -n higress-system
+
+# 预期输出:
+# NAME                        AGE
+# higress-memory-alerts       5m
+
+3. 检查 Prometheus Targets
+-------------------------------------------
+# 访问 Prometheus UI
+open http://localhost:9090/targets
+
+# 应该看到:
+# - higress-gateway (UP)
+# - higress-controller (UP)
+
+4. 查询指标验证
+-------------------------------------------
+# 在 Prometheus UI 执行:
+up{namespace="higress-system"}
+
+# 应该返回值为 1
+
+================================================================================
+🔧 故障排查
+================================================================================
+
+问题 1: PodMonitor 无数据
+-------------------------------------------
+# 检查 Pod 标签
+kubectl get pod -n higress-system --show-labels
+
+# 检查 PodMonitor selector
+kubectl describe podmonitor higress-gateway -n higress-system
+
+# 确认标签匹配
+
+问题 2: Prometheus 无法抓取
+-------------------------------------------
+# 检查 Pod 端口
+kubectl exec -n higress-system \
+  $(kubectl get pod -n higress-system -l app=higress-gateway -o jsonpath='{.items[0].metadata.name}') \
+  -- netstat -tlnp | grep 15020
+
+# 应该看到 15020 端口监听
+
+问题 3: Dashboard 无数据
+-------------------------------------------
+# 1. 检查 Prometheus 是否有数据
+# 2. 检查 Grafana 数据源连接
+# 3. 调整时间范围（默认最近1小时）
+# 4. 验证 PromQL 查询语法
+
+================================================================================
+📞 获取帮助
+================================================================================
+
+文档:
+  - 快速开始: cat QUICKSTART.md
+  - 完整文档: cat README.md
+  - 文档索引: cat 00-INDEX.md
+
+日志:
+  - Prometheus: kubectl logs -n monitoring prometheus-kube-prometheus-prometheus-0
+  - Grafana: kubectl logs -n monitoring -l app.kubernetes.io/name=grafana
+
+配置检查:
+  - PodMonitor: kubectl describe podmonitor -n higress-system
+  - PrometheusRule: kubectl describe prometheusrule -n higress-system
+  - Higress Pods: kubectl describe pod -n higress-system -l app=higress-gateway
+
+================================================================================
+📝 下一步
+================================================================================
+
+1. 访问 Grafana Dashboard 查看实时内存数据
+2. 根据实际使用情况调整告警阈值
+3. 配置告警通知（Email/Slack/钉钉/Webhook）
+4. 定期检查内存使用趋势，优化资源配置
+
+================================================================================
+配置完成！Happy Monitoring! 🎉
+================================================================================

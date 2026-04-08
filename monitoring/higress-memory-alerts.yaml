@@ -1,0 +1,218 @@
+# Higress 内存告警规则
+# 用于监控 Higress Gateway 和 Controller 的内存使用情况
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: higress-memory-alerts
+  namespace: higress-system
+  labels:
+    release: prometheus
+    app: higress
+spec:
+  groups:
+    - name: higress.memory.alerts
+      interval: 30s
+      rules:
+        # Gateway 内存使用率告警（警告级别）
+        - alert: HigressGatewayHighMemoryUsage
+          expr: |
+            rate(container_memory_working_set_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            }[5m]) / container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            } * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            component: gateway
+          annotations:
+            summary: "Higress Gateway 内存使用率过高"
+            description: "Pod {{ $labels.pod }} 内存使用率为 {{ $value | humanizePercentage }}，超过80%阈值"
+
+        # Gateway 内存接近限制告警（严重级别）
+        - alert: HigressGatewayMemoryNearLimit
+          expr: |
+            container_memory_working_set_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            } / container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            } > 0.9
+          for: 5m
+          labels:
+            severity: critical
+            component: gateway
+          annotations:
+            summary: "Higress Gateway 内存接近限制"
+            description: "Pod {{ $labels.pod }} 内存使用超过90%，可能发生 OOM"
+
+        # Gateway OOM 预警
+        - alert: HigressGatewayPotentialOOM
+          expr: |
+            predict_linear(
+              container_memory_working_set_bytes{
+                namespace="higress-system",
+                pod=~"higress-gateway.*",
+                container!="",
+                container!="POD"
+              }[30m],
+              3600
+            ) > container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            } * 0.95
+          for: 10m
+          labels:
+            severity: critical
+            component: gateway
+          annotations:
+            summary: "Higress Gateway 可能发生 OOM"
+            description: "Pod {{ $labels.pod }} 预计在1小时内发生 OOM，请立即处理"
+
+        # Gateway 内存持续增长告警
+        - alert: HigressGatewayMemoryGrowing
+          expr: |
+            rate(container_memory_working_set_bytes{
+              namespace="higress-system",
+              pod=~"higress-gateway.*",
+              container!="",
+              container!="POD"
+            }[1h]) > 0
+          for: 2h
+          labels:
+            severity: warning
+            component: gateway
+          annotations:
+            summary: "Higress Gateway 内存持续增长"
+            description: "Pod {{ $labels.pod }} 内存持续增长2小时，可能存在内存泄漏"
+
+        # Controller 内存使用率告警
+        - alert: HigressControllerHighMemoryUsage
+          expr: |
+            rate(container_memory_working_set_bytes{
+              namespace="higress-system",
+              pod=~"higress-controller.*",
+              container!="",
+              container!="POD"
+            }[5m]) / container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              pod=~"higress-controller.*",
+              container!="",
+              container!="POD"
+            } * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            component: controller
+          annotations:
+            summary: "Higress Controller 内存使用率过高"
+            description: "Pod {{ $labels.pod }} 内存使用率为 {{ $value | humanizePercentage }}，超过80%阈值"
+
+        # Controller 内存接近限制告警
+        - alert: HigressControllerMemoryNearLimit
+          expr: |
+            container_memory_working_set_bytes{
+              namespace="higress-system",
+              pod=~"higress-controller.*",
+              container!="",
+              container!="POD"
+            } / container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              pod=~"higress-controller.*",
+              container!="",
+              container!="POD"
+            } > 0.9
+          for: 5m
+          labels:
+            severity: critical
+            component: controller
+          annotations:
+            summary: "Higress Controller 内存接近限制"
+            description: "Pod {{ $labels.pod }} 内存使用超过90%，可能发生 OOM"
+
+        # Go Heap 内存使用过高告警
+        - alert: HigressHighGoHeapUsage
+          expr: |
+            go_memstats_heap_inuse_bytes{
+              namespace="higress-system"
+            } / go_memstats_heap_size_bytes{
+              namespace="higress-system"
+            } > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Higress Go Heap 内存使用过高"
+            description: "Pod {{ $labels.pod }} Go Heap 使用率为 {{ $value | humanizePercentage }}"
+
+        # Go GC 频繁告警
+        - alert: HigressHighGCFrequency
+          expr: |
+            rate(go_gc_duration_seconds_count{
+              namespace="higress-system"
+            }[5m]) > 10
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Higress GC 频率过高"
+            description: "Pod {{ $labels.pod }} GC 频率为 {{ $value }}/秒，可能影响性能"
+
+        # 内存使用趋势告警（15分钟内增长超过20%）
+        - alert: HigressMemorySpike
+          expr: |
+            (container_memory_working_set_bytes{
+              namespace="higress-system",
+              container!="",
+              container!="POD"
+            } - container_memory_working_set_bytes{
+              namespace="higress-system",
+              container!="",
+              container!="POD"
+            } offset 15m) / container_memory_working_set_bytes{
+              namespace="higress-system",
+              container!="",
+              container!="POD"
+            } offset 15m > 0.2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Higress 内存突增"
+            description: "Pod {{ $labels.pod }} 15分钟内内存增长超过20%"
+
+        # 预计1小时后内存不足
+        - alert: HigressInsufficientMemoryIn1h
+          expr: |
+            predict_linear(
+              container_memory_working_set_bytes{
+                namespace="higress-system",
+                container!="",
+                container!="POD"
+              }[30m],
+              3600
+            ) > container_spec_memory_limit_bytes{
+              namespace="higress-system",
+              container!="",
+              container!="POD"
+            }
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Higress 1小时后内存不足"
+            description: "Pod {{ $labels.pod }} 预计1小时后内存不足，需要扩容"

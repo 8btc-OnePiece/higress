@@ -1,0 +1,73 @@
+# Higress 配置文件（启用监控）
+# 使用方式: helm upgrade --install higress ./helm/core -f higress-values-with-metrics.yaml
+
+global:
+  # 启用 Prometheus 合并
+  enablePrometheusMerge: true
+  # 启用轻量级指标（可选）
+  liteMetrics: false
+
+gateway:
+  name: "higress-gateway"
+  replicas: 1
+
+  # 启用指标采集
+  metrics:
+    enabled: true
+    provider: monitoring.coreos.com
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+
+  # 服务配置
+  service:
+    type: LoadBalancer
+
+  # Pod 标签（用于 Prometheus 识别）
+  labels:
+    app: higress-gateway
+
+  # Pod 注解
+  annotations:
+    # Prometheus 注解（兼容传统 Prometheus）
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "15020"
+    prometheus.io/path: "/stats/prometheus"
+
+controller:
+  name: "higress-controller"
+  replicas: 1
+
+  # 启用指标采集
+  metrics:
+    enabled: true
+    provider: monitoring.coreos.com
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+
+  # Pod 标签
+  labels:
+    app: higress-controller
+
+  # Pod 注解
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "15020"
+    prometheus.io/path: "/stats/prometheus"
+
+# 资源限制（建议配置以便监控内存使用）
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# 环境变量（可选：启用调试级别的日志）
+env:
+  - name: PILOT_ENABLE_STATUS
+    value: "true"
+  - name: PILOT_ENABLE_METADATA_EXCHANGE
+    value: "true"

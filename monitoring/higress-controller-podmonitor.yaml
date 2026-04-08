@@ -1,0 +1,23 @@
+# Higress Controller PodMonitor
+# 用于收集 Higress Controller 的监控指标
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: higress-controller
+  namespace: higress-system
+  labels:
+    app: higress-controller
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: higress-controller
+  podMetricsEndpoints:
+    - port: http-monitoring
+      path: /stats/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__address__]
+          targetLabel: instance
+          replacement: 'higress-controller'
