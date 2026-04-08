@@ -141,6 +141,14 @@ type KeyNameQuotaConfig struct {
 func parseConfig(json gjson.Result, config *KeyNameQuotaConfig) error {
 	log.Debugf("parse config()")
 
+	// 简单开关：配额总开关（true=启用，false=禁用）
+	quotaEnabled := json.Get("quota_enabled")
+	if quotaEnabled.Exists() && !quotaEnabled.Bool() {
+		log.Infof("Quota feature is DISABLED by quota_enabled=%s", quotaEnabled.Bool())
+	} else {
+		log.Infof("Quota feature is ENABLED (default)")
+	}
+
 	// 解析 authHeader，默认为 Authorization
 	config.AuthHeader = json.Get("authHeader").String()
 	if config.AuthHeader == "" {
