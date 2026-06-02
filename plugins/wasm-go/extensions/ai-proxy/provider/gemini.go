@@ -199,7 +199,7 @@ func (g *geminiProvider) onEmbeddingsRequestBody(ctx wrapper.HttpContext, body [
 }
 
 func (g *geminiProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool) ([]byte, error) {
-	log.Debugf("chunk body:%s", string(chunk))
+// 	log.Debugf("chunk body:%s", string(chunk))
 	if isLastChunk || len(chunk) == 0 {
 		return nil, nil
 	}
@@ -271,7 +271,7 @@ func (g *geminiProvider) buildImageGenerationResponse(ctx wrapper.HttpContext, g
 }
 
 func (g *geminiProvider) onChatCompletionResponseBody(ctx wrapper.HttpContext, body []byte) ([]byte, error) {
-	log.Debugf("chat completion response body:%s", string(body))
+// 	log.Debugf("chat completion response body:%s", string(body))
 	geminiResponse := &geminiChatResponse{}
 	if err := json.Unmarshal(body, geminiResponse); err != nil {
 		return nil, fmt.Errorf("unable to unmarshal gemini chat response: %v", err)

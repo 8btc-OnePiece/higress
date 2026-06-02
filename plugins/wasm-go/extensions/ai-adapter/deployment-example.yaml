@@ -1,0 +1,142 @@
+# AI Adapter Plugin 部署示例
+# 使用前请先构建 Docker 镜像并推送到镜像仓库
+
+---
+# WasmPlugin 资源定义
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: ai-adapter
+  namespace: higress-system
+spec:
+  # 插件镜像地址
+  image: your-registry/ai-adapter:1.0.0
+
+  # 插件优先级（数值越大优先级越高）
+  # 确保在 key-auth、model-router、ai-proxy 之后执行
+  priority: 500
+
+  # 插件执行阶段
+  phase: AUTHN
+
+  # 默认配置
+  defaultConfig: |
+    {
+      "modelProviderMappings": [
+        {
+          "model": "gpt-image-2",
+          "provider": "Azure",
+          "requestTransform": {
+            "type": "format_transform",
+            "formatTransform": {
+              "targetFormat": "multipart",
+              "multipartConfig": {
+                "fieldMapping": {
+                  "image": "file"
+                }
+              }
+            }
+          }
+        },
+        {
+          "model": "gpt-image-2",
+          "provider": "RightCode",
+          "requestTransform": {
+            "type": "url_rewrite",
+            "urlRewrite": {
+              "fromPattern": "/v1/images/edits",
+              "toPattern": "/v1/images/generations"
+            }
+          }
+        },
+        {
+          "model": "gpt-image-2",
+          "provider": "Qiniu",
+          "requestTransform": {
+            "type": "none"
+          }
+        }
+      ],
+      "defaultProvider": "OpenAI",
+      "enableRequestTransform": true,
+      "enableResponseTransform": false
+    }
+
+---
+# 为特定域名配置不同的转换规则
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: ai-gateway
+  namespace: default
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: higress-gateway
+  hostnames:
+    - "api.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              # 设置 Provider 标识，供 ai-adapter 插件使用
+              X-Provider: "Azure"
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: ai-service
+          port: 8080
+
+---
+# ConfigMap 配置示例（可选）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-adapter-config
+  namespace: higress-system
+data:
+  azure-config.json: |
+    {
+      "modelProviderMappings": [
+        {
+          "model": "gpt-image-2",
+          "provider": "Azure",
+          "requestTransform": {
+            "type": "format_transform",
+            "formatTransform": {
+              "targetFormat": "multipart",
+              "multipartConfig": {
+                "fieldMapping": {
+                  "image": "file"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "enableRequestTransform": true
+    }
+
+  rightcode-config.json: |
+    {
+      "modelProviderMappings": [
+        {
+          "model": "gpt-image-2",
+          "provider": "RightCode",
+          "requestTransform": {
+            "type": "url_rewrite",
+            "urlRewrite": {
+              "fromPattern": "/v1/images/edits",
+              "toPattern": "/v1/images/generations"
+            }
+          }
+        }
+      ],
+      "enableRequestTransform": true
+    }

@@ -1,0 +1,78 @@
+{
+  "_comment": "AI Adapter 多渠道配置示例 - 支持多个渠道的请求/响应转换配置",
+  "_azure_example": "Azure 渠道：将 image 参数转换为 multipart file 格式",
+  "_rightcode_example": "RightCode 渠道：URL 重写 (/v1/images/edits -> /v1/images/generations)",
+  "_qiniu_example": "Qiniu 渠道：不进行任何转换",
+  "modelProviderMappings": [
+    {
+      "_comment": "Azure 渠道 - gpt-image-2 模型适配",
+      "_description": "将请求 body 的 image 参数转换为 multipart file 格式，key 是 file，value 是文件流",
+      "model": "gpt-image-2",
+      "provider": "Azure",
+      "requestTransform": {
+        "type": "format_transform",
+        "formatTransform": {
+          "targetFormat": "multipart",
+          "multipartConfig": {
+            "fieldMapping": {
+              "image": "file"
+            },
+            "removeFields": ["model", "n"],
+            "addFields": {
+              "api_version": "2023-06-01-preview"
+            }
+          }
+        }
+      }
+    },
+    {
+      "_comment": "RightCode 渠道 - gpt-image-2 模型适配",
+      "_description": "URL 重写：/v1/images/edits 和 /v1/images/generations 都重写为 /v1/images/generations",
+      "model": "gpt-image-2",
+      "provider": "RightCode",
+      "requestTransform": {
+        "type": "url_rewrite",
+        "urlRewrite": {
+          "fromPattern": "/v1/images/edits",
+          "toPattern": "/v1/images/generations"
+        }
+      }
+    },
+    {
+      "_comment": "Qiniu 渠道 - gpt-image-2 模型适配",
+      "_description": "不进行任何转换，直接透传请求",
+      "model": "gpt-image-2",
+      "provider": "Qiniu",
+      "requestTransform": {
+        "type": "none"
+      }
+    },
+    {
+      "_comment": "通配符匹配 - 所有以 gpt- 开头的模型",
+      "_description": "默认使用 OpenAI 渠道，添加自定义头",
+      "model": "gpt-*",
+      "provider": "OpenAI",
+      "requestTransform": {
+        "type": "header_transform",
+        "headerTransform": {
+          "addHeaders": {
+            "X-Custom-Header": "AI-Gateway"
+          },
+          "removeHeaders": ["X-Internal-Header"]
+        }
+      },
+      "responseTransform": {
+        "type": "body_transform",
+        "bodyTransform": {
+          "setValues": {
+            "provider": "OpenAI",
+            "gateway": "ai-adapter"
+          }
+        }
+      }
+    }
+  ],
+  "defaultProvider": "OpenAI",
+  "enableRequestTransform": true,
+  "enableResponseTransform": false
+}

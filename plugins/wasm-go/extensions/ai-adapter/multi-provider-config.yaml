@@ -1,0 +1,245 @@
+# AI Adapter 多渠道配置规范示例
+# 展示如何为同一个模型配置多个不同的渠道转换规则
+
+# ========================================
+# 场景说明
+# ========================================
+# 根据请求的模型名称和实际路由到的服务（cluster_name）应用不同的转换规则：
+# 1. 模型 gpt-image-2，路由到 Azure - 需要将 image 数组参数转换为 multipart file 格式
+# 2. 模型 gpt-image-2，路由到 RightCode - 需要重写 API 路径
+# 3. 模型 gpt-image-2，路由到 Qiniu - 不需要任何转换
+
+# ========================================
+# 匹配逻辑
+# ========================================
+# 1. 插件首先检查请求的模型名称（从 wasm.requestModel 属性获取）
+# 2. 如果没有配置适用于该模型，直接跳过处理
+# 3. 如果有配置，获取实际路由的服务名称（cluster_name）
+# 4. 同时匹配模型名称和 provider 名称，找到对应的转换配置
+#
+# 注意：
+# - 一个模型可以配置多个不同的 provider 转换规则
+# - 只有当模型和 provider 都匹配时，插件才会应用转换
+# - cluster_name 由 Higress 负载均衡模块自动确定
+# - cluster_name 格式: outbound|443||llm-RightCodes.internal.dns
+# - 插件会自动提取服务名称部分（如 RightCodes）进行匹配
+
+# ========================================
+# 配置示例
+# ========================================
+modelProviderMappings:
+  # ----------------------------------------
+  # gpt-image-2 模型的 Azure 渠道配置
+  # ----------------------------------------
+  # 需求：将请求 body 的 image 数组参数转换为 multipart file 格式
+  # 说明：
+  #   - model: 请求的模型名称，支持通配符（如 "gpt-*"）
+  #   - provider: 实际路由到的服务名称（从 cluster_name 提取）
+  #   - cluster_name 示例: outbound|443||llm-Azure.internal.dns -> provider: "Azure"
+  #   - image 字段（数组）会被转换为多个 multipart file 格式
+  #   - key 是 image[0], image[1]...，value 是对应的文件流
+  #   - 其他字段（如 prompt）正常保留为 form 字段
+  #   - 支持的图片格式：
+  #     * Base64 编码: data:image/png;base64,iVBORw0KGgo...（推荐）
+  #     * URL: http://example.com/image.jpg 或 https://example.com/image.png
+  #   - URL 图片在 WASM 环境中不支持下载，会降级为文本处理
+  #   - 支持的图片类型: jpg, png, gif, webp, bmp, tiff, svg, ico, pdf
+  #   - 如需使用 URL 图片，请在客户端转换为 Base64 格式
+  - model: gpt-image-2
+    provider: Azure
+    requestTransform:
+      type: format_transform
+      formatTransform:
+        targetFormat: multipart
+        multipartConfig:
+          # 字段映射：指定哪些字段需要转换为文件流
+          # 格式：JSON字段名: multipart字段名
+          fieldMapping:
+            image: image  # 将 JSON 中的 image 数组转换为 multipart 中的多个文件流
+
+  # ----------------------------------------
+  # gpt-image-2 模型的 RightCode 渠道配置
+  # ----------------------------------------
+  # 需求：将 /v1/images/edits 重写为 /v1/images/generations
+  # 场景：RightCode 只支持统一的图片生成接口
+  # cluster_name 示例: outbound|443||llm-RightCodes.internal.dns -> provider: "RightCodes"
+  - model: gpt-image-2
+    provider: RightCodes
+    requestTransform:
+      type: url_rewrite
+      urlRewrite:
+        # 从模式：图生图接口
+        fromPattern: /v1/images/edits
+        # 到模式：统一重写为图片生成接口
+        toPattern: /v1/images/generations
+
+  # ----------------------------------------
+  # gpt-image-2 模型的 Qiniu 渠道配置
+  # ----------------------------------------
+  # 需求：不进行任何转换
+  # cluster_name 示例: outbound|443||llm-Qiniu.internal.dns -> provider: "Qiniu"
+  - model: gpt-image-2
+    provider: Qiniu
+    requestTransform:
+      type: none
+
+# 是否启用请求转换
+enableRequestTransform: true
+
+# 是否启用响应转换
+enableResponseTransform: false
+
+# 图片下载服务名称
+# 用于从 URL 下载图片时指定服务
+imageDownloadServiceName: wujieai-cdn
+
+# ========================================
+# cluster_name 提取规则
+# ========================================
+# cluster_name 格式: outbound|443||llm-ServiceName.internal.dns
+#
+# 提取步骤：
+# 1. 按 "||" 分割，获取第三部分（服务名称部分）
+# 2. 移除 "llm-" 前缀（如果存在）
+# 3. 提取第一个点之前的部分（去除 DNS 后缀）
+#
+# 示例：
+# - outbound|443||llm-Azure.internal.dns       -> Azure
+# - outbound|443||llm-RightCodes.internal.dns  -> RightCodes
+# - outbound|443||llm-Qiniu.internal.dns       -> Qiniu
+# - outbound|8080||TestService.prod.example.com -> TestService
+
+# ========================================
+# 请求示例
+# ========================================
+# 场景1：模型 gpt-image-2，路由到 Azure 渠道
+# curl -X POST http://gateway/v1/images/generations \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "model": "gpt-image-2",
+#     "image": ["data:image/png;base64,iVBORw0KGgo..."],
+#     "prompt": "a beautiful landscape"
+#   }'
+#
+# 插件处理流程：
+# 1. 从请求中获取模型名称: gpt-image-2
+# 2. 检查是否有 gpt-image-2 的配置：有
+# 3. 获取 cluster_name: outbound|443||llm-Azure.internal.dns
+# 4. 提取 provider: Azure
+# 5. 匹配到 (model: gpt-image-2, provider: Azure) 的配置
+# 6. 将 JSON 转换为 multipart/form-data，image 数组转换为文件流
+#
+# 场景2：模型 gpt-image-2，路由到 RightCode 渠道
+# curl -X POST http://gateway/v1/images/edits \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "model": "gpt-image-2",
+#     "image": ["data:image/png;base64,iVBORw0KGgo..."],
+#     "prompt": "a beautiful landscape"
+#   }'
+#
+# 插件处理流程：
+# 1. 从请求中获取模型名称: gpt-image-2
+# 2. 检查是否有 gpt-image-2 的配置：有
+# 3. 获取 cluster_name: outbound|443||llm-RightCodes.internal.dns
+# 4. 提取 provider: RightCodes
+# 5. 匹配到 (model: gpt-image-2, provider: RightCodes) 的配置
+# 6. 将 URL 从 /v1/images/edits 重写为 /v1/images/generations
+#
+# 场景3：模型 unknown-model，路由到 Azure 渠道
+# curl -X POST http://gateway/v1/images/generations \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "model": "unknown-model",
+#     "image": ["data:image/png;base64,iVBORw0KGgo..."],
+#     "prompt": "a beautiful landscape"
+#   }'
+#
+# 插件处理流程：
+# 1. 从请求中获取模型名称: unknown-model
+# 2. 检查是否有 unknown-model 的配置：没有
+# 3. 直接跳过处理，不进行任何转换
+
+# ========================================
+# 配置规范说明
+# ========================================
+#
+# 1. modelProviderMappings: 数组，按顺序匹配
+#    - model: 模型名称（支持通配符，如 "gpt-*"）
+#    - provider: 渠道名称（从 cluster_name 提取，不含 "llm-" 前缀和 DNS 后缀）
+#    - requestTransform: 请求转换配置
+#    - responseTransform: 响应转换配置（可选）
+#
+# 2. 匹配规则：
+#    - 必须同时匹配 model 和 provider
+#    - model 支持通配符匹配（精确匹配、* 通配、前缀通配）
+#    - provider 支持通配符匹配（精确匹配、* 通配、前缀通配）
+#
+# 3. requestTransform 配置项：
+#    - type: 转换类型，可选值：
+#      * "none" - 不转换
+#      * "url_rewrite" - URL 重写
+#      * "format_transform" - 格式转换
+#      * "param_transform" - 参数转换
+#      * "header_transform" - 头转换
+#      * "body_transform" - Body 转换
+#
+# 4. format_transform 配置项：
+#    - targetFormat: 目标格式，目前支持 "multipart"
+#    - multipartConfig: multipart 配置
+#      - fieldMapping: 字段映射（旧字段名: 新字段名）
+#      - addFields: 要添加的字段（字段名: 值）
+#
+# 5. url_rewrite 配置项：
+#    - fromPattern: 匹配模式（字符串替换）
+#    - toPattern: 替换目标
+#    - path: 直接设置新路径（与 fromPattern/toPattern 二选一）
+#
+# 6. base64 图片处理：
+#    - 插件自动识别 data:image/...;base64,... 格式的字符串
+#    - 自动解码为二进制数据
+#    - 作为 multipart file 字段上传
+#    - 默认文件名为字段名.png
+#
+# 7. 查询参数保留：
+#    - URL 重写时会保留原始请求的查询参数
+#    - 例如：/v1/images/edits?param=value -> /v1/images/generations?param=value
+#
+# ========================================
+# 高级配置示例
+# ========================================
+#
+# 支持通配符匹配多个模型：
+# - model: "gpt-*"  # 匹配所有以 gpt- 开头的模型
+# - model: "*"      # 匹配所有模型（通常作为最后兜底）
+#
+# 响应转换示例：
+# responseTransform:
+#   type: body_transform
+#   bodyTransform:
+#     setValues:
+#       provider: "Azure"  # 在响应中添加 provider 字段
+#     removePaths:
+#       - "internal_field"  # 移除内部字段
+#
+# 参数转换示例：
+# requestTransform:
+#   type: param_transform
+#   paramTransform:
+#     renameMap:
+#       old_param: new_param
+#     removeParams:
+#       - "unused_param"
+#     addParams:
+#       extra_param: "value"
+#
+# 头转换示例：
+# requestTransform:
+#   type: header_transform
+#   headerTransform:
+#     addHeaders:
+#       X-Custom-Header: "value"
+#     removeHeaders:
+#       - "X-Internal-Header"
+#     renameHeaders:
+#       X-Old-Header: X-New-Header

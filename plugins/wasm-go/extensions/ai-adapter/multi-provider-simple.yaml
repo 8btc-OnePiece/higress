@@ -1,0 +1,32 @@
+# AI Adapter 多渠道配置示例
+# gpt-image-2 模型适配三个不同渠道的转换规则
+
+modelProviderMappings:
+  # gpt-image-2 模型的 Azure 渠道配置：将 image 参数转换为 multipart file 格式
+  - model: gpt-image-2
+    provider: Azure
+    requestTransform:
+      type: format_transform
+      formatTransform:
+        targetFormat: multipart
+        multipartConfig:
+          fieldMapping:
+            image: file
+
+  # gpt-image-2 模型的 RightCode 渠道配置：URL 重写 (/v1/images/edits -> /v1/images/generations)
+  - model: gpt-image-2
+    provider: RightCode
+    requestTransform:
+      type: url_rewrite
+      urlRewrite:
+        fromPattern: /v1/images/edits
+        toPattern: /v1/images/generations
+
+  # gpt-image-2 模型的 Qiniu 渠道配置：不进行任何转换
+  - model: gpt-image-2
+    provider: Qiniu
+    requestTransform:
+      type: none
+
+enableRequestTransform: true
+enableResponseTransform: false

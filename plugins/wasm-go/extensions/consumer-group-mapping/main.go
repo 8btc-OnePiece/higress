@@ -164,23 +164,23 @@ func parseConfig(json gjson.Result, config *ConsumerGroupMappingConfig, log log.
 
 // onHttpRequestHeaders 在鉴权前执行
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingConfig, log log.Log) types.Action {
-	log.Infof("=== Consumer Group Mapping Plugin: onHttpRequestHeaders called ===")
+	log.Debugf("=== Consumer Group Mapping Plugin: onHttpRequestHeaders called ===")
 
 	// 1. 获取 Authorization header 的值
 	authValue, err := proxywasm.GetHttpRequestHeader(config.AuthHeader)
 	if err != nil || authValue == "" {
-		log.Infof("=== Consumer Group Mapping Plugin: no %s header, skipping ===", config.AuthHeader)
+		log.Debugf("=== Consumer Group Mapping Plugin: no %s header, skipping ===", config.AuthHeader)
 		return types.ActionContinue
 	}
 
 	// 2. 提取 API Key
 	apiKey := extractApiKey(authValue)
 	if apiKey == "" {
-		log.Infof("=== Consumer Group Mapping Plugin: failed to extract API key, skipping ===")
+		log.Debugf("=== Consumer Group Mapping Plugin: failed to extract API key, skipping ===")
 		return types.ActionContinue
 	}
 
-	log.Infof("=== Consumer Group Mapping Plugin: extracted API key: %s ===", maskApiKey(apiKey))
+// 	log.Debugf("=== Consumer Group Mapping Plugin: extracted API key: %s ===", maskApiKey(apiKey))
 
 	// 3. 保存原始 API Key 到新的 header
 	if err := proxywasm.ReplaceHttpRequestHeader(OriginalApiKeyHeader, apiKey); err != nil {
@@ -206,8 +206,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 		requestPath += "?" + config.ApiKeyParamName + "=" + url.QueryEscape(apiKey)
 	}
 
-	log.Infof("=== Consumer Group Mapping Plugin: calling API, path: %s ===", requestPath)
-	log.Infof("=== Consumer Group Mapping Plugin: target host: %s ===", parsedUrl.Hostname())
+	log.Debugf("=== Consumer Group Mapping Plugin: calling API, path: %s ===", requestPath)
 
 	// 6. 发起异步 HTTP 调用
 	// DnsCluster 会使用配置的 Domain 作为 Host header
@@ -216,13 +215,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 		requestPath,
 		nil,
 		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-			log.Infof("=== Consumer Group Mapping Plugin: HTTP callback triggered, status=%d ===", statusCode)
+			log.Debugf("=== Consumer Group Mapping Plugin: HTTP callback triggered, status=%d ===", statusCode)
 
 			defer func() {
 				if err := recover(); err != nil {
-					log.Errorf("=== Consumer Group Mapping Plugin: panic in callback: %v ===", err)
+					log.Errorf("=== Consumer Group Mapping Plugin: panic recovered in callback: %v ===", err)
 				}
-				log.Infof("=== Consumer Group Mapping Plugin: resuming request ===")
+				log.Debugf("=== Consumer Group Mapping Plugin: resuming request ===")
 				proxywasm.ResumeHttpRequest()
 			}()
 
@@ -270,7 +269,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 				return
 			}
 
-			log.Infof("=== Consumer Group Mapping Plugin: fetched groupKey: %s ===", maskApiKey(groupKey))
+			log.Debugf("=== Consumer Group Mapping Plugin: fetched groupKey: %s ===", maskApiKey(groupKey))
 
 			// 7. 替换 Authorization header
 			authValue, _ := proxywasm.GetHttpRequestHeader(config.AuthHeader)
@@ -283,7 +282,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 			ctx.SetContext("group_api_key", groupKey)
 			ctx.SetContext("need_restore", true)
 
-			log.Infof("=== Consumer Group Mapping Plugin: successfully replaced API key ===")
+// 			log.Debugf("=== Consumer Group Mapping Plugin: successfully replaced API key ===")
 		},
 		uint32(config.Timeout),
 	)
@@ -294,7 +293,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 		return types.ActionContinue
 	}
 
-	log.Infof("=== Consumer Group Mapping Plugin: initiated async HTTP call, pausing ===")
+	log.Debugf("=== Consumer Group Mapping Plugin: initiated async HTTP call, pausing ===")
+	ctx.DontReadRequestBody()
 	return types.HeaderStopAllIterationAndWatermark
 }
 
@@ -331,7 +331,11 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingC
 		}
 	}
 
+	// 清理上下文值，防止内存泄漏
 	ctx.SetContext("need_restore", nil)
+	ctx.SetContext("original_api_key", nil)
+	ctx.SetContext("original_auth_value", nil)
+	ctx.SetContext("group_api_key", nil)
 	return types.ActionContinue
 }
 

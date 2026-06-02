@@ -1,0 +1,99 @@
+# @Name ai-adapter
+# @Category custom
+# @Phase AUTHN
+# @Priority 500
+# @Title zh-CN AI渠道适配器
+# @Description zh-CN 用于解决不同AI服务渠道之间的协议差异，支持请求/响应转换、URL重写、参数映射等功能
+# @Title en-US AI Channel Adapter
+# @Description en-US Resolves protocol differences between different AI service channels, supports request/response transformation, URL rewriting, parameter mapping, etc.
+# @IconUrl https://img.alicdn.com/imgextra/i1/O1CN018iKKih1iVx287RltL_!!6000000004419-2-tps-42-42.png
+# @Version 1.0.0
+#
+# @Contact.name Higress Team
+# @Contact.url https://higress.io
+# @Contact.email contact@higress.io
+#
+# @Example zh-CN
+# {
+#   "modelProviderMappings": [
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "Azure",
+#       "requestTransform": {
+#         "type": "format_transform",
+#         "formatTransform": {
+#           "targetFormat": "multipart",
+#           "multipartConfig": {
+#             "fieldMapping": {
+#               "image": "file"
+#             }
+#           }
+#         }
+#       }
+#     },
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "RightCode",
+#       "requestTransform": {
+#         "type": "url_rewrite",
+#         "urlRewrite": {
+#           "fromPattern": "/v1/images/edits",
+#           "toPattern": "/v1/images/generations"
+#         }
+#       }
+#     },
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "Qiniu",
+#       "requestTransform": {
+#         "type": "none"
+#       }
+#     }
+#   ],
+#   "defaultProvider": "OpenAI",
+#   "enableRequestTransform": true,
+#   "enableResponseTransform": false
+# }
+# @End
+# @Example en-US
+# {
+#   "modelProviderMappings": [
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "Azure",
+#       "requestTransform": {
+#         "type": "format_transform",
+#         "formatTransform": {
+#           "targetFormat": "multipart",
+#           "multipartConfig": {
+#             "fieldMapping": {
+#               "image": "file"
+#             }
+#           }
+#         }
+#       }
+#     },
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "RightCode",
+#       "requestTransform": {
+#         "type": "url_rewrite",
+#         "urlRewrite": {
+#           "fromPattern": "/v1/images/edits",
+#           "toPattern": "/v1/images/generations"
+#         }
+#       }
+#     },
+#     {
+#       "model": "gpt-image-2",
+#       "provider": "Qiniu",
+#       "requestTransform": {
+#         "type": "none"
+#       }
+#     }
+#   ],
+#   "defaultProvider": "OpenAI",
+#   "enableRequestTransform": true,
+#   "enableResponseTransform": false
+# }
+# @End

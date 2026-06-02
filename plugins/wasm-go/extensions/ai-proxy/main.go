@@ -185,7 +185,17 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 		return types.ActionContinue
 	}
 
-	log.Debugf("[onHttpRequestHeader] provider=%s", activeProvider.GetProviderType())
+	log.Debugf("[onHttpRequestHeader] provider0=%s", activeProvider.GetProviderType())
+
+	// 将 provider 类型设置到 Envoy 属性中，供后续插件使用
+	propertyKey := "wasm." + provider.CtxKeyProviderType
+	_ = proxywasm.SetProperty([]string{propertyKey}, []byte(activeProvider.GetProviderType()))
+
+	if providerType, err := proxywasm.GetProperty([]string{propertyKey}); err == nil {
+		log.Debugf("[onHttpRequestHeader] provider1=%s", string(providerType))
+	} else {
+		log.Debugf("[onHttpRequestHeader] failed to get providerType from property: %v", err)
+	}
 
 	// Disable the route re-calculation since the plugin may modify some headers related to the chosen route.
 	ctx.DisableReroute()
@@ -300,7 +310,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 		if providerConfig.IsOpenAIProtocol() && (apiName == provider.ApiNameChatCompletion || apiName == provider.ApiNameCompletion) {
 			newBody = normalizeOpenAiRequestBody(newBody)
 		}
-		log.Debugf("[onHttpRequestBody] newBody=%s", newBody)
+		log.Debugf("[onHttpRequestBody] apiName=%s newBody=%s", apiName, newBody)
 		body = newBody
 		action, err := handler.OnRequestBody(ctx, apiName, body)
 		if err == nil {
@@ -407,7 +417,7 @@ func onStreamingResponseBody(ctx wrapper.HttpContext, pluginConfig config.Plugin
 		}
 		var responseBuilder strings.Builder
 		for _, event := range events {
-			log.Debugf("processing event: %v", event)
+// 			log.Debugf("processing event: %v", event)
 
 			if event.IsEndData() {
 				responseBuilder.WriteString(event.ToHttpString())

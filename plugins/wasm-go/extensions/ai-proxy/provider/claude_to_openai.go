@@ -258,7 +258,7 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIResponseToClaude(ctx wrapper.Http
 					Signature: "", // OpenAI doesn't provide signature, use empty string
 					Thinking:  reasoningText,
 				})
-				log.Debugf("[OpenAI->Claude] Added thinking content: %s", reasoningText)
+// 				log.Debugf("[OpenAI->Claude] Added thinking content: %s", reasoningText)
 			}
 
 			// Add text content if present
@@ -309,13 +309,13 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIResponseToClaude(ctx wrapper.Http
 		return nil, fmt.Errorf("unable to marshal claude response: %v", err)
 	}
 
-	log.Debugf("[OpenAI->Claude] Converted Claude response body: %s", string(result))
+// 	log.Debugf("[OpenAI->Claude] Converted Claude response body: %s", string(result))
 	return result, nil
 }
 
 // ConvertOpenAIStreamResponseToClaude converts OpenAI streaming response to Claude format
 func (c *ClaudeToOpenAIConverter) ConvertOpenAIStreamResponseToClaude(ctx wrapper.HttpContext, chunk []byte) ([]byte, error) {
-	log.Debugf("[OpenAI->Claude] Original OpenAI streaming chunk: %s", string(chunk))
+// 	log.Debugf("[OpenAI->Claude] Original OpenAI streaming chunk: %s", string(chunk))
 
 	// For streaming responses, we need to handle the Server-Sent Events format
 	lines := strings.Split(string(chunk), "\n")
@@ -419,7 +419,7 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIStreamResponseToClaude(ctx wrappe
 
 			// Convert to Claude streaming format
 			claudeStreamResponses := c.buildClaudeStreamResponse(ctx, &openaiStreamResponse)
-			log.Debugf("[OpenAI->Claude] Generated %d Claude stream events from OpenAI chunk", len(claudeStreamResponses))
+// 			log.Debugf("[OpenAI->Claude] Generated %d Claude stream events from OpenAI chunk", len(claudeStreamResponses))
 
 			for i, claudeStreamResponse := range claudeStreamResponses {
 				responseData, err := json.Marshal(claudeStreamResponse)
@@ -434,7 +434,7 @@ func (c *ClaudeToOpenAIConverter) ConvertOpenAIStreamResponseToClaude(ctx wrappe
 	}
 
 	claudeChunk := []byte(result.String())
-	log.Debugf("[OpenAI->Claude] Converted Claude streaming chunk: %s", string(claudeChunk))
+// 	log.Debugf("[OpenAI->Claude] Converted Claude streaming chunk: %s", string(claudeChunk))
 	return claudeChunk, nil
 }
 
@@ -454,13 +454,13 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 	var responses []*claudeTextGenStreamResponse
 
 	// Log what we're processing
-	hasRole := choice.Delta != nil && choice.Delta.Role != ""
-	hasContent := choice.Delta != nil && choice.Delta.Content != ""
-	hasFinishReason := choice.FinishReason != nil
-	hasUsage := openaiResponse.Usage != nil
+// 	hasRole := choice.Delta != nil && choice.Delta.Role != ""
+// 	hasContent := choice.Delta != nil && choice.Delta.Content != ""
+// 	hasFinishReason := choice.FinishReason != nil
+// 	hasUsage := openaiResponse.Usage != nil
 
-	log.Debugf("[OpenAI->Claude] Processing OpenAI chunk - Role: %v, Content: %v, FinishReason: %v, Usage: %v",
-		hasRole, hasContent, hasFinishReason, hasUsage)
+// 	log.Debugf("[OpenAI->Claude] Processing OpenAI chunk - Role: %v, Content: %v, FinishReason: %v, Usage: %v",
+// 		hasRole, hasContent, hasFinishReason, hasUsage)
 
 	// Handle message start (only once)
 	// Note: OpenRouter may send multiple messages with role but empty content at the start
@@ -507,7 +507,7 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 	}
 
 	if reasoningText != "" {
-		log.Debugf("[OpenAI->Claude] Processing reasoning content delta: %s", reasoningText)
+// 		log.Debugf("[OpenAI->Claude] Processing reasoning content delta: %s", reasoningText)
 
 		// Send content_block_start for thinking only once with dynamic index
 		if !c.thinkingBlockStarted {
@@ -546,7 +546,7 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 			return responses
 		}
 
-		log.Debugf("[OpenAI->Claude] Processing content delta: %s", deltaContent)
+// 		log.Debugf("[OpenAI->Claude] Processing content delta: %s", deltaContent)
 
 		// Close thinking content block if it's still open
 		if c.thinkingBlockStarted && !c.thinkingBlockStopped {
@@ -575,7 +575,7 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 		}
 
 		// Send content_block_delta
-		log.Debugf("[OpenAI->Claude] Generated content_block_delta event with text: %s", deltaContent)
+// 		log.Debugf("[OpenAI->Claude] Generated content_block_delta event with text: %s", deltaContent)
 		responses = append(responses, &claudeTextGenStreamResponse{
 			Type:  "content_block_delta",
 			Index: &c.textBlockIndex,
@@ -594,8 +594,8 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 		}
 
 		for _, toolCall := range choice.Delta.ToolCalls {
-			log.Debugf("[OpenAI->Claude] Processing tool call delta: index=%d, id=%s, name=%s, args=%s",
-				toolCall.Index, toolCall.Id, toolCall.Function.Name, toolCall.Function.Arguments)
+// 			log.Debugf("[OpenAI->Claude] Processing tool call delta: index=%d, id=%s, name=%s, args=%s",
+// 				toolCall.Index, toolCall.Id, toolCall.Function.Name, toolCall.Function.Arguments)
 
 			// Handle new tool call (has id and name)
 			if toolCall.Id != "" && toolCall.Function.Name != "" {
@@ -627,8 +627,8 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 				if toolState, exists := c.toolCallStates[toolCall.Index]; exists {
 					// Always cache arguments for this tool call
 					toolState.cachedArguments += toolCall.Function.Arguments
-					log.Debugf("[OpenAI->Claude] Cached arguments for tool index %d: %s (total: %s)",
-						toolCall.Index, toolCall.Function.Arguments, toolState.cachedArguments)
+// 					log.Debugf("[OpenAI->Claude] Cached arguments for tool index %d: %s (total: %s)",
+// 						toolCall.Index, toolCall.Function.Arguments, toolState.cachedArguments)
 
 					// Send input_json_delta event only if this tool is currently active and content block started
 					if c.activeToolIndex != nil && *c.activeToolIndex == toolCall.Index && toolState.contentBlockStarted {
@@ -651,7 +651,7 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 	// Handle finish reason
 	if choice.FinishReason != nil {
 		claudeFinishReason := openAIFinishReasonToClaude(*choice.FinishReason)
-		log.Debugf("[OpenAI->Claude] Processing finish_reason: %s -> %s", *choice.FinishReason, claudeFinishReason)
+// 		log.Debugf("[OpenAI->Claude] Processing finish_reason: %s -> %s", *choice.FinishReason, claudeFinishReason)
 
 		// Send content_block_stop for any active content blocks
 		if c.thinkingBlockStarted && !c.thinkingBlockStopped {
@@ -723,8 +723,8 @@ func (c *ClaudeToOpenAIConverter) buildClaudeStreamResponse(ctx wrapper.HttpCont
 
 	// Handle usage information
 	if openaiResponse.Usage != nil && choice.FinishReason == nil {
-		log.Debugf("[OpenAI->Claude] Processing usage info - input: %d, output: %d",
-			openaiResponse.Usage.PromptTokens, openaiResponse.Usage.CompletionTokens)
+// 		log.Debugf("[OpenAI->Claude] Processing usage info - input: %d, output: %d",
+// 			openaiResponse.Usage.PromptTokens, openaiResponse.Usage.CompletionTokens)
 
 		// Send message_delta with both stop_reason and usage (Claude protocol requirement)
 		messageDelta := &claudeTextGenStreamResponse{
@@ -897,7 +897,7 @@ func (c *ClaudeToOpenAIConverter) startToolCall(toolState *toolCallInfo) []*clau
 
 	// Send any cached arguments as input_json_delta events
 	if toolState.cachedArguments != "" {
-		log.Debugf("[OpenAI->Claude] Outputting cached arguments for tool: %s", toolState.cachedArguments)
+// 		log.Debugf("[OpenAI->Claude] Outputting cached arguments for tool: %s", toolState.cachedArguments)
 		responses = append(responses, &claudeTextGenStreamResponse{
 			Type:  "content_block_delta",
 			Index: &toolState.claudeContentIndex,

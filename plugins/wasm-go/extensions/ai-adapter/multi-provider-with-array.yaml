@@ -1,0 +1,62 @@
+# AI Adapter 多渠道配置示例（支持 Image 数组）
+
+# 场景说明
+# 根据请求的模型名称和实际路由到的服务（cluster_name）应用不同的转换规则
+# 支持：单个图片和图片数组
+
+modelProviderMappings:
+  # ----------------------------------------
+  # gpt-image-2 模型的 Azure 服务配置
+  # ----------------------------------------
+  # 需求：将 image 数组参数转换为 multipart file 格式
+  # 支持：
+  #   1. Base64 编码的图片数组 -> 解码后转换为文件流（推荐）
+  #   2. URL 格式的图片数组 -> 在 WASM 环境中不支持下载，降级为文本处理
+  #   3. 每个数组元素独立处理为 image[0], image[1]...
+  #   4. 其他字段（如 prompt）正常保留为 form 字段
+  #   5. 支持的图片类型: jpg, png, gif, webp, bmp, tiff, svg, ico, pdf
+  #   如需使用 URL 图片，请在客户端转换为 Base64 格式
+  - model: gpt-image-2
+    provider: Azure
+    requestTransform:
+      type: format_transform
+      formatTransform:
+        targetFormat: multipart
+        multipartConfig:
+          # 字段映射：指定哪些字段需要转换为文件流
+          fieldMapping:
+            image: image  # 将 JSON 中的 image 数组转换为 multipart 中的多个文件流
+
+  # ----------------------------------------
+  # gpt-image-2 模型的 RightCode 服务配置
+  # ----------------------------------------
+  # 需求：将 /v1/images/edits 重写为 /v1/images/generations
+  - model: gpt-image-2
+    provider: RightCode
+    requestTransform:
+      type: url_rewrite
+      urlRewrite:
+        fromPattern: /v1/images/edits
+        toPattern: /v1/images/generations
+
+  # ----------------------------------------
+  # gpt-image-2 模型的 Qiniu 服务配置
+  # ----------------------------------------
+  # 需求：不进行任何转换，直接透传
+  - model: gpt-image-2
+    provider: Qiniu
+    requestTransform:
+      type: none
+
+enableRequestTransform: true
+enableResponseTransform: false
+
+# 图片下载服务名称
+# 用于从 URL 下载图片时指定服务
+imageDownloadServiceName: wujieai-cdn
+
+# ========================================
+# 请求示例
+# ========================================
+# 当请求的模型是 gpt-image-2 且路由到 Azure 服务时，插件会自动应用 Azure 配置的转换规则
+# cluster_name 由 Higress 负载均衡自动确定

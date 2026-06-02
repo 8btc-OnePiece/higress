@@ -169,6 +169,7 @@ const (
 	ctxKeyPushedMessage          = "pushedMessage"
 	ctxKeyContentPushed          = "contentPushed"
 	ctxKeyReasoningContentPushed = "reasoningContentPushed"
+	CtxKeyProviderType           = "providerType"
 
 	objectChatCompletion      = "chat.completion"
 	objectChatCompletionChunk = "chat.completion.chunk"

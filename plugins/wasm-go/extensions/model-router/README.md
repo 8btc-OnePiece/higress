@@ -1,202 +1,212 @@
-## 功能说明
-`model-router`插件实现了基于LLM协议中的model参数路由的功能
+# Model Router Plugin
 
-## 配置字段
+Higress WASM 插件，用于基于规则自动路由到不同的模型。
 
-| 名称                 | 数据类型        | 填写要求                | 默认值                   | 描述                                                  |
-| -----------          | --------------- | ----------------------- | ------                   | -------------------------------------------           |
-| `modelKey`           | string          | 选填                    | model                    | 请求body中model参数的位置                             |
-| `addProviderHeader`  | string          | 选填                    | -                        | 从model参数中解析出的provider名字放到哪个请求header中 |
-| `modelToHeader`      | string          | 选填                    | -                        | 直接将model参数放到哪个请求header中                   |
-| `enableOnPathSuffix` | array of string | 选填                    | ["/completions","/embeddings","/images/generations","/audio/speech","/fine_tuning/jobs","/moderations","/image-synthesis","/video-synthesis","/rerank","/messages"] | 只对这些特定路径后缀的请求生效，可以配置为 "*" 以匹配所有路径 |
-| `autoRouting`        | object          | 选填                    | -                        | 自动路由配置，详见下方说明                            |
+## 功能特性
 
-### autoRouting 配置
+1. **模型路由**: 根据请求体中的 `model` 字段或 `*` 通配符路由到指定的模型
+2. **前缀匹配**: 支持按前缀匹配模型名称（如 `openai/*` 路由到 `gpt-4`）
+3. **Header 映射**: 将模型信息映射到请求头（`x-higress-llm-model`）
+4. **Provider 拆分**: 自动从模型标识（如 `openai/gpt-4`）中提取 provider 并添加到请求头
+5. **自动路由**: 支持基于正则表达式的自动路由规则，根据用户消息内容自动选择模型
+6. **路径后缀过滤**: 只对特定路径后缀的请求进行处理（如 `/completions`, `/embeddings` 等）
 
-| 名称           | 数据类型        | 填写要求 | 默认值 | 描述                                                         |
-| -------------- | --------------- | -------- | ------ | ------------------------------------------------------------ |
-| `enable`       | bool            | 必填     | false  | 是否启用自动路由功能                                         |
-| `defaultModel` | string          | 选填     | -      | 当没有规则匹配时使用的默认模型                               |
-| `rules`        | array of object | 选填     | -      | 路由规则数组，按顺序匹配                                     |
+## 快速开始
 
-### rules 配置
+### 构建插件
 
-| 名称      | 数据类型 | 填写要求 | 描述                                                         |
-| --------- | -------- | -------- | ------------------------------------------------------------ |
-| `pattern` | string   | 必填     | 正则表达式，用于匹配用户消息内容                             |
-| `model`   | string   | 必填     | 匹配成功时设置的模型名称，将设置到 `x-higress-llm-model` 请求头 |
+```bash
+# 使用 Go 1.24 原生编译（默认）
+./build.sh
 
-## 运行属性
+# 使用 TinyGo 编译（生成更小的 WASM 文件）
+./build.sh tinygo
 
-插件执行阶段：认证阶段
-插件执行优先级：900
-
-## 效果说明
-
-### 基于 model 参数进行路由
-
-需要做如下配置：
-
-```yaml
-modelToHeader: x-higress-llm-model
+# 或者使用 Makefile
+make build-go
 ```
 
-插件会将请求中 model 参数提取出来，设置到 x-higress-llm-model 这个请求 header 中，用于后续路由，举例来说，原生的 LLM 请求体是：
+### 构建并推送镜像
+
+```bash
+# 一键构建和推送
+./build-and-push.sh
+
+# 或者使用 Makefile
+make all
+```
+
+## 配置说明
+
+### 基础配置
 
 ```json
 {
-    "model": "qwen-long",
-    "frequency_penalty": 0,
-    "max_tokens": 800,
-    "stream": false,
-    "messages": [{
-        "role": "user",
-        "content": "higress项目主仓库的github地址是什么"
-    }],
-    "presence_penalty": 0,
-    "temperature": 0.7,
-    "top_p": 0.95
+  "modelKey": "model",
+  "modelMapping": {
+    "gpt-3.5": "gpt-4",
+    "gpt-4": "gpt-4-32k",
+    "openai/*": "gpt-4",
+    "claude/*": "claude-3-sonnet",
+    "*": "gpt-4"
+  },
+  "defaultModel": "gpt-4",
+  "enableOnPathSuffix": [
+    "/completions",
+    "/embeddings",
+    "/audio/speech",
+    "/fine_tuning/jobs",
+    "/moderations",
+    "/image-synthesis",
+    "/video-synthesis",
+    "/rerank",
+    "/messages"
+  ],
+  "addProviderHeader": "x-higress-llm-provider",
+  "modelToHeader": "x-higress-llm-model"
 }
 ```
 
-经过这个插件后，将添加下面这个请求头(可以用于路由匹配)：
-
-x-higress-llm-model: qwen-long
-
-### 提取 model 参数中的 provider 字段用于路由
-
-> 注意这种模式需要客户端在 model 参数中通过`/`分隔的方式，来指定 provider
-
-需要做如下配置：
-
-```yaml
-addProviderHeader: x-higress-llm-provider
-```
-
-插件会将请求中 model 参数的 provider 部分（如果有）提取出来，设置到 x-higress-llm-provider 这个请求 header 中，用于后续路由，并将 model 参数重写为模型名称部分。举例来说，原生的 LLM 请求体是：
+### 自动路由配置
 
 ```json
 {
-    "model": "dashscope/qwen-long",
-    "frequency_penalty": 0,
-    "max_tokens": 800,
-    "stream": false,
-    "messages": [{
-        "role": "user",
-        "content": "higress项目主仓库的github地址是什么"
-    }],
-    "presence_penalty": 0,
-    "temperature": 0.7,
-    "top_p": 0.95
-}
-```
-
-经过这个插件后，将添加下面这个请求头(可以用于路由匹配)：
-
-x-higress-llm-provider: dashscope
-
-原始的 LLM 请求体将被改成：
-
-```json
-{
-    "model": "qwen-long",
-    "frequency_penalty": 0,
-    "max_tokens": 800,
-    "stream": false,
-    "messages": [{
-        "role": "user",
-        "content": "higress项目主仓库的github地址是什么"
-    }],
-    "presence_penalty": 0,
-    "temperature": 0.7,
-    "top_p": 0.95
-}
-```
-
-### 自动路由模式（基于用户消息内容）
-
-当请求中的 model 参数设置为 `higress/auto` 时，插件会自动分析用户消息内容，并根据配置的正则规则选择合适的模型进行路由。
-
-配置示例：
-
-```yaml
-autoRouting:
-  enable: true
-  defaultModel: "qwen-turbo"
-  rules:
-    - pattern: "(?i)(画|绘|生成图|图片|image|draw|paint)"
-      model: "qwen-vl-max"
-    - pattern: "(?i)(代码|编程|code|program|function|debug)"
-      model: "qwen-coder"
-    - pattern: "(?i)(翻译|translate|translation)"
-      model: "qwen-turbo"
-    - pattern: "(?i)(数学|计算|math|calculate)"
-      model: "qwen-math"
-```
-
-#### 工作原理
-
-1. 当检测到请求体中的 model 参数值为 `higress/auto` 时，触发自动路由逻辑
-2. 从请求体的 `messages` 数组中提取最后一个 `role` 为 `user` 的消息内容
-3. 按配置的规则顺序，依次使用正则表达式匹配用户消息
-4. 匹配成功时，将对应的 model 值设置到 `x-higress-llm-model` 请求头
-5. 如果所有规则都未匹配，则使用 `defaultModel` 配置的默认模型
-6. 如果未配置 `defaultModel` 且无规则匹配，则不设置路由头（会记录警告日志）
-
-#### 使用示例
-
-客户端请求：
-
-```json
-{
-    "model": "higress/auto",
-    "messages": [
-        {
-            "role": "system",
-            "content": "你是一个有帮助的助手"
-        },
-        {
-            "role": "user",
-            "content": "请帮我画一只可爱的小猫"
-        }
+  "autoRouting": {
+    "enable": true,
+    "defaultModel": "gpt-4",
+    "rules": [
+      {
+        "pattern": ".*图片.*",
+        "model": "gpt-4-vision"
+      },
+      {
+        "pattern": ".*代码.*|.*编程.*",
+        "model": "claude-3-sonnet"
+      },
+      {
+        "pattern": ".*翻译.*",
+        "model": "gpt-4"
+      }
     ]
+  }
 }
 ```
 
-由于用户消息中包含"画"关键词，匹配到第一条规则，插件会设置请求头：
+## 在 Higress 中使用
 
+```yaml
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: model-router
+spec:
+  priority: 200
+  image: docker.swr.cn-east-3.myhuaweicloud.com/btc8_public/higress-model-router:1.0.0
+  config: |
+    {
+      "modelKey": "model",
+      "modelMapping": {
+        "*": "gpt-4"
+      }
+    }
 ```
-x-higress-llm-model: qwen-vl-max
-```
 
-#### 支持的消息格式
+## 使用示例
 
-自动路由支持两种常见的 content 格式：
+### 示例 1: 简单模型映射
 
-1. **字符串格式**（标准文本消息）：
+请求:
 ```json
 {
-    "role": "user",
-    "content": "用户消息内容"
+  "model": "gpt-3.5"
 }
 ```
 
-2. **数组格式**（多模态消息，如包含图片）：
+处理结果:
+- `model` 字段被替换为 `gpt-4`
+- 添加请求头 `x-higress-llm-model: gpt-4`
+
+### 示例 2: Provider 拆分
+
+请求:
 ```json
 {
-    "role": "user",
-    "content": [
-        {"type": "text", "text": "用户消息内容"},
-        {"type": "image_url", "image_url": {"url": "..."}}
+  "model": "openai/gpt-4"
+}
+```
+
+配置:
+```json
+{
+  "addProviderHeader": "x-higress-llm-provider"
+}
+```
+
+处理结果:
+- 添加请求头 `x-higress-llm-provider: openai`
+- 添加请求头 `x-higress-llm-model: gpt-4`
+
+### 示例 3: 前缀匹配
+
+配置:
+```json
+{
+  "modelMapping": {
+    "claude/*": "claude-3-sonnet"
+  }
+}
+```
+
+请求:
+```json
+{
+  "model": "claude-3-opus"
+}
+```
+
+处理结果:
+- `model` 字段被替换为 `claude-3-sonnet`
+
+### 示例 4: 自动路由
+
+Chat API 请求:
+```json
+{
+  "messages": [
+    {"role": "assistant", "content": "你好"},
+    {"role": "user", "content": "请帮我处理这张图片"}
+  ],
+  "model": "higress/auto"
+}
+```
+
+配置:
+```json
+{
+  "autoRouting": {
+    "enable": true,
+    "rules": [
+      {"pattern": ".*图片.*", "model": "gpt-4-vision"}
     ]
+  }
 }
 ```
 
-对于数组格式，插件会提取最后一个 `type` 为 `text` 的内容进行匹配。
+处理结果:
+- 用户消息匹配正则 `.*图片.*`
+- `model` 字段被替换为 `gpt-4-vision`
+- 添加请求头 `x-higress-llm-model: gpt-4-vision`
 
-#### 正则表达式说明
+## 文件说明
 
-- 规则按配置顺序依次匹配，第一个匹配成功的规则生效
-- 支持标准 Go 正则语法
-- 推荐使用 `(?i)` 标志实现大小写不敏感匹配
-- 使用 `|` 可以匹配多个关键词
+- `main.go`: 插件主程序
+- `Makefile`: Make 构建配置
+- `Dockerfile`: Docker 镜像构建文件
+- `VERSION`: 版本号
+- `build.sh`: 构建脚本（支持 Go 原生编译和 TinyGo）
+- `build-and-push.sh`: 一键构建并推送镜像
+- `README.md`: 中文使用文档
+
+## 版本
+
+当前版本: 1.0.0

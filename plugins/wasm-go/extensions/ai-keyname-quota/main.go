@@ -51,8 +51,11 @@ func init() {
 		pluginName,
 		wrapper.ParseConfig(parseConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingResponseBody),
+		wrapper.WithRebuildAfterRequests[KeyNameQuotaConfig](200),
+		wrapper.WithRebuildMaxMemBytes[KeyNameQuotaConfig](50*1024*1024),
 	)
 }
 
@@ -314,16 +317,13 @@ func parseConfig(json gjson.Result, config *KeyNameQuotaConfig) error {
 	log.Debugf("ai-keyname-quota plugin loaded:")
 	log.Debugf("  authHeader: %s", config.AuthHeader)
 	log.Debugf("  quotaPools count: %d", len(config.QuotaPools))
-	//for i, pool := range config.QuotaPools {
-	//	log.Debugf("  quota_pool[%d]: prefix=%s, limit=%d", i, pool.KeyNamePrefix, pool.QuotaLimit)
-	//}
 
 	return nil
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) types.Action {
 	ctx.DisableReroute()
-	log.Debugf("onHttpRequestHeaders()")
+	ctx.DontReadRequestBody()
 
 	// 1. 获取原始 API Key
 	// 优先从 X-Original-Api-Key header 获取（由 consumer-group-mapping 等插件设置）
@@ -333,7 +333,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 		// 如果 X-Original-Api-Key 不存在，尝试从 Authorization header 提取
 		authValue, err := proxywasm.GetHttpRequestHeader(config.AuthHeader)
 		if err != nil || authValue == "" {
-			log.Debugf("no %s or %s header, skipping", OriginalApiKeyHeader, config.AuthHeader)
+// 			log.Debugf("no %s or %s header, skipping", OriginalApiKeyHeader, config.AuthHeader)
 			return types.ActionContinue
 		}
 
@@ -343,8 +343,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 			return types.ActionContinue
 		}
 	}
-
-	log.Debugf("got api_key: %s from header: %s", maskApiKey(apiKey), OriginalApiKeyHeader)
 
 	// 保存原始 API Key
 	ctx.SetContext("api_key", apiKey)
@@ -366,12 +364,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 		requestPath += "?apiKey=" + url.QueryEscape(apiKey)
 	}
 
-	log.Debugf("querying keyname for api_key: %s", maskApiKey(apiKey))
-	log.Debugf("HTTP client config: serviceName=%s, timeout=%dms", config.KeyNameService.ServiceName, config.KeyNameService.Timeout)
-	log.Debugf("HTTP request: path=%s", requestPath)
 
 	// 3. 发起异步 HTTP 调用
-	log.Debugf("initiating HTTP GET request...")
 	err = config.apiClient.Get(
 		requestPath,
 		nil,
@@ -380,7 +374,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 
 			defer func() {
 				if err := recover(); err != nil {
-					log.Errorf("panic in callback: %v", err)
+					log.Errorf("panic recovered in callback: %v, resuming request", err)
+					proxywasm.ResumeHttpRequest()
 				}
 			}()
 
@@ -446,7 +441,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 			// 6. 检查配额（参考 ai-quota）
 			apiKey := ctx.GetContext("api_key").(string)
 			redisKey := config.GlobalRedisKeyPrefix + matchedPool.RedisKeyPrefix + ":" + apiKey
-			log.Debugf("checking quota for keyname '%s', redis_key=%s", keyname, redisKey)
+// 			log.Debugf("checking quota for keyname '%s', redis_key=%s", keyname, redisKey)
 
 			config.redisClient.Get(redisKey, func(response resp.Value) {
 				log.Debugf("redis get callback for keyname '%s', redis_key=%s", keyname, redisKey)
@@ -509,12 +504,21 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) ty
 		return types.ActionPause
 	}
 
-	log.Debugf("HTTP call initiated successfully, pausing request")
 	return types.HeaderStopAllIterationAndWatermark
 }
 
+func onHttpResponseHeaders(ctx wrapper.HttpContext, config KeyNameQuotaConfig) types.Action {
+	// 参考 ai-proxy：如果没有匹配的配额池，不需要读取响应体
+	matchedPool := ctx.GetContext("matched_pool")
+	if matchedPool == nil {
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
+	return types.ActionContinue
+}
+
 func onHttpResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaConfig, body []byte) types.Action {
-	log.Debugf("onHttpResponseBody() called, body length=%d", len(body))
+// 	log.Debugf("onHttpResponseBody() called, body length=%d", len(body))
 
 	// 处理非流式响应的配额扣减
 	matchedPool := ctx.GetContext("matched_pool")
@@ -533,8 +537,21 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaConfig, body
 	if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
 		inputToken := usage.InputToken
 		outputToken := usage.OutputToken
-		keyname := ctx.GetContext("keyname").(string)
-		apiKey := ctx.GetContext("api_key").(string)
+
+		keynameValue := ctx.GetContext("keyname")
+		if keynameValue == nil {
+			log.Debugf("onHttpResponseBody(): keyname context not found, skipping quota deduction")
+			return types.ActionContinue
+		}
+		keyname := keynameValue.(string)
+
+		apiKeyValue := ctx.GetContext("api_key")
+		if apiKeyValue == nil {
+			log.Debugf("onHttpResponseBody(): api_key context not found, skipping quota deduction")
+			return types.ActionContinue
+		}
+		apiKey := apiKeyValue.(string)
+
 		totalToken := int(inputToken + outputToken)
 
 		redisKey := config.GlobalRedisKeyPrefix + pool.RedisKeyPrefix + ":" + apiKey
@@ -548,13 +565,15 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaConfig, body
 		log.Debugf("onHttpResponseBody(): no token usage found in response")
 	}
 
-	log.Debugf("onHttpResponseBody() completed")
+	// 清理 context，避免内存泄漏
+	ctx.SetContext("api_key", nil)
+	ctx.SetContext("keyname", nil)
+	ctx.SetContext("matched_pool", nil)
+
 	return types.ActionContinue
 }
 
 func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaConfig, data []byte, endOfStream bool) []byte {
-	log.Debugf("onHttpStreamingResponseBody() called, data length=%d, endOfStream=%v", len(data), endOfStream)
-
 	// 1. 提取 token 使用量（参考 ai-quota）
 	if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
 		ctx.SetContext(tokenusage.CtxKeyInputToken, usage.InputToken)
@@ -569,7 +588,7 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaCon
 		return data
 	}
 
-	log.Debugf("onHttpStreamingResponseBody(): stream ended, processing quota deduction")
+// 	log.Debugf("onHttpStreamingResponseBody(): stream ended, processing quota deduction")
 
 	matchedPool := ctx.GetContext("matched_pool")
 	if matchedPool == nil {
@@ -579,20 +598,37 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaCon
 
 	pool, ok := matchedPool.(*QuotaPool)
 	if !ok {
-		log.Debugf("onHttpStreamingResponseBody(): failed to cast matched_pool to *QuotaPool, skipping")
 		return data
 	}
 
-	if ctx.GetContext(tokenusage.CtxKeyInputToken) == nil ||
-		ctx.GetContext(tokenusage.CtxKeyOutputToken) == nil {
-		log.Debugf("onHttpStreamingResponseBody(): token context not found, skipping quota deduction")
+	inputTokenValue := ctx.GetContext(tokenusage.CtxKeyInputToken)
+	outputTokenValue := ctx.GetContext(tokenusage.CtxKeyOutputToken)
+	if inputTokenValue == nil || outputTokenValue == nil {
 		return data
 	}
 
-	inputToken := ctx.GetContext(tokenusage.CtxKeyInputToken).(int64)
-	outputToken := ctx.GetContext(tokenusage.CtxKeyOutputToken).(int64)
-	keyname := ctx.GetContext("keyname").(string)
-	apiKey := ctx.GetContext("api_key").(string)
+	inputToken, ok := inputTokenValue.(int64)
+	if !ok {
+		return data
+	}
+
+	outputToken, ok := outputTokenValue.(int64)
+	if !ok {
+		return data
+	}
+
+	keynameValue := ctx.GetContext("keyname")
+	if keynameValue == nil {
+		return data
+	}
+	keyname := keynameValue.(string)
+
+	apiKeyValue := ctx.GetContext("api_key")
+	if apiKeyValue == nil {
+		return data
+	}
+	apiKey := apiKeyValue.(string)
+
 	totalToken := int(inputToken + outputToken)
 
 	redisKey := config.GlobalRedisKeyPrefix + pool.RedisKeyPrefix + ":" + apiKey
@@ -602,6 +638,14 @@ func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config KeyNameQuotaCon
 	config.redisClient.DecrBy(redisKey, totalToken, nil)
 
 	log.Debugf("onHttpStreamingResponseBody() completed, quota deducted for keyname '%s'", keyname)
+
+	// 清理 context，避免内存泄漏
+	ctx.SetContext("api_key", nil)
+	ctx.SetContext("keyname", nil)
+	ctx.SetContext("matched_pool", nil)
+	ctx.SetContext(tokenusage.CtxKeyInputToken, nil)
+	ctx.SetContext(tokenusage.CtxKeyOutputToken, nil)
+
 	return data
 }
 

@@ -30,6 +30,9 @@ const (
 	CtxKeyTotalToken  = "token_total"
 	CtxRequestStart    = "request_start_time"
 	CtxFirstToken     = "first_token_time"
+	CtxTokenUsage      = "token_usage_raw"
+	CtxSkipPlugin     = "skip_token_report"
+	providerTypeKey   = "providerType"
 
 	// HTTP headers
 	OriginalAPIKey = "X-Original-Api-Key"
@@ -46,11 +49,14 @@ type TokenUsageReportRequest struct {
 	RequestId   string `json:"requestId"`
 	Model       string `json:"model"`
 	UserKey     string `json:"userKey"`
-	InputToken  int32  `json:"inputToken"`
-	OutputToken int32  `json:"outputToken"`
-	TotalToken  int32  `json:"totalToken"`
+	InputToken  int64  `json:"inputToken"`
+	OutputToken int64  `json:"outputToken"`
+	TotalToken  int64  `json:"totalToken"`
 	Duration    int64  `json:"duration"`
 	Timestamp   int64  `json:"timestamp"`
+	StartTime   int64  `json:"startTime"`
+	EndTime     int64  `json:"endTime"`
+	TokenUsage  string `json:"tokenUsage"`
 }
 
 // TokenUsageReportConfig holds the configuration for token usage reporting
@@ -70,7 +76,6 @@ func init() {
 		wrapper.ParseConfig(parseConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
-		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
 	)
@@ -159,51 +164,80 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		return types.ActionContinue
 	}
 
-	// Extract model from request body and save to context
-	requestPath, _ := proxywasm.GetHttpRequestHeader(":path")
-	log.Debugf("ai-token-report: processing request path: %s", requestPath)
+	// 检查 providerType，如果为空则跳过本插件（非 AI 路由）
+	providerType := getProviderType()
+	if providerType == "" {
+		log.Debugf("ai-token-report: providerType is empty, skipping (not an AI route)")
+		ctx.DontReadRequestBody()
+		ctx.DontReadResponseBody()
+		ctx.SetContext(CtxSkipPlugin, true)
+		return types.ActionContinue
+	}
 
 	// Set request start time
 	ctx.SetContext(CtxRequestStart, time.Now().UnixMilli())
-	log.Debugf("ai-token-report: set request start time")
+
+	requestModel := getRequestModel()
+	ctx.SetContext(CtxKeyModel, requestModel)
+
+	log.Debugf("ai-token-report: processing AI request, providerType=%s, requestModel=%s", providerType, requestModel)
 
 	return types.ActionContinue
 }
 
 func onHttpRequestBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, body []byte) types.Action {
-	// Check if plugin is enabled
+	// 检查是否设置了跳过标记
+	if ctx.GetContext(CtxSkipPlugin) != nil {
+		return types.ActionContinue
+	}
+
+	// 检查 plugin 是否启用
 	if config.reportApiUrl == "" {
 		return types.ActionContinue
 	}
 
-	// Extract model from request body and save to context
-	if len(body) > 0 && !config.disableOpenaiUsage {
-		if model := gjson.GetBytes(body, "model"); model.Exists() {
-			ctx.SetContext(CtxKeyModel, model.String())
-			log.Debugf("ai-token-report: extracted model from request body: %s", model.String())
+	// 如果 requestModel 为空，尝试从 body 中提取
+	model, _ := ctx.GetContext(CtxKeyModel).(string)
+	if model == "" {
+		parsed := gjson.ParseBytes(body)
+		model = parsed.Get("model").String()
+		if model != "" {
+			ctx.SetContext(CtxKeyModel, model)
+			log.Debugf("ai-token-report: extracted model from request body: %s", model)
 		}
 	}
 
+    // 如果 model 为空，则跳过读取响应体
+	if model == "" {
+		log.Debugf("ai-token-report: request model is empty, skipping response body read")
+		ctx.DontReadResponseBody()
+	}
+
 	return types.ActionContinue
 }
 
-func onHttpResponseHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig) types.Action {
-	// Check if plugin is enabled
-	if config.reportApiUrl == "" {
-		return types.ActionContinue
+func getProviderType() string {
+	propertyKey := "wasm." + providerTypeKey
+	if providerType, err := proxywasm.GetProperty([]string{propertyKey}); err == nil {
+		return string(providerType)
 	}
+	return ""
+}
 
-	// Check if this is streaming response by looking at content-type
-	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
-	if contentType != "" && (strings.Contains(contentType, "text/event-stream") ||
-		strings.Contains(contentType, "text/stream")) {
-		log.Debugf("ai-token-report: streaming response detected (content-type: %s)", contentType)
+func getRequestModel() string {
+	propertyKey := "wasm.requestModel"
+	if requestModel, err := proxywasm.GetProperty([]string{propertyKey}); err == nil {
+		return string(requestModel)
 	}
-
-	return types.ActionContinue
+	return ""
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, data []byte, endOfStream bool) []byte {
+	// 检查是否设置了跳过标记
+	if ctx.GetContext(CtxSkipPlugin) != nil {
+		return data
+	}
+
 	// Check if plugin is enabled
 	if config.reportApiUrl == "" {
 		return data
@@ -212,18 +246,20 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 	// Set first token time if not already set
 	if ctx.GetContext(CtxFirstToken) == nil {
 		ctx.SetContext(CtxFirstToken, time.Now().UnixMilli())
-		log.Debugf("ai-token-report: set first token time (streaming)")
 	}
 
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-			ctx.SetContext(CtxKeyModel, usage.Model)
+// 			ctx.SetContext(CtxKeyModel, usage.Model)
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
-			log.Debugf("ai-token-report: extracted token usage (streaming): model=%s, input=%d, output=%d, total=%d",
-				usage.Model, usage.InputToken, usage.OutputToken, usage.TotalToken)
+			// 存储原始的 tokenUsage JSON 字符串
+			usageJSON, err := json.Marshal(usage)
+			if err == nil {
+				ctx.SetContext(CtxTokenUsage, string(usageJSON))
+			}
 		}
 	}
 
@@ -240,16 +276,19 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 		duration := responseEndTime - requestStartTime
 		ctx.SetContext(LLMServiceDuration, duration)
 
-		log.Debugf("ai-token-report: streaming request duration: %dms", duration)
-
 		// Report token usage
-		reportTokenUsageFromContext(ctx, config)
+		reportTokenUsageFromContext(ctx, config, data)
 	}
 
 	return data
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, body []byte) types.Action {
+	// 检查是否设置了跳过标记
+	if ctx.GetContext(CtxSkipPlugin) != nil {
+		return types.ActionContinue
+	}
+
 	// Check if plugin is enabled
 	if config.reportApiUrl == "" {
 		return types.ActionContinue
@@ -266,22 +305,25 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 	duration := responseEndTime - requestStartTime
 	ctx.SetContext(LLMServiceDuration, duration)
 
-	log.Debugf("ai-token-report: request duration: %dms", duration)
-
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-			ctx.SetContext(CtxKeyModel, usage.Model)
+// 			ctx.SetContext(CtxKeyModel, usage.Model)
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
+			// 存储原始的 tokenUsage JSON 字符串
+			usageJSON, err := json.Marshal(usage)
+			if err == nil {
+				ctx.SetContext(CtxTokenUsage, string(usageJSON))
+			}
 			log.Debugf("ai-token-report: extracted token usage (non-streaming): model=%s, input=%d, output=%d, total=%d",
 				usage.Model, usage.InputToken, usage.OutputToken, usage.TotalToken)
 		}
 	}
 
 	// Report token usage
-	reportTokenUsageFromContext(ctx, config)
+	reportTokenUsageFromContext(ctx, config, body)
 
 	return types.ActionContinue
 }
@@ -324,7 +366,8 @@ func convertToUInt(val interface{}) (uint64, bool) {
 	}
 }
 
-func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, model string, inputTokens, outputTokens, totalTokens uint64, duration int64) {
+func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, model string, inputTokens, outputTokens,
+                      totalTokens uint64, duration int64, startTime, endTime int64, tokenUsage string) {
 	// Add panic recovery to ensure reporting never crashes the main flow
 	defer func() {
 		if r := recover(); r != nil {
@@ -365,21 +408,19 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		log.Debugf("reportTokenUsage using generated ID: %s", requestID)
 	}
 
-	// Convert uint64 to int32 for JSON marshaling (API expects Integer)
-	inputTokenInt := int32(inputTokens)
-	outputTokenInt := int32(outputTokens)
-	totalTokenInt := int32(totalTokens)
-
 	// Build request body
 	reportReq := TokenUsageReportRequest{
 		RequestId:   requestID,
 		Model:       model,
 		UserKey:     userKey,
-		InputToken:  inputTokenInt,
-		OutputToken: outputTokenInt,
-		TotalToken:  totalTokenInt,
+		InputToken:  int64(inputTokens),
+		OutputToken: int64(outputTokens),
+		TotalToken:  int64(totalTokens),
 		Duration:    duration,
 		Timestamp:   timestamp,
+		StartTime:   startTime,
+		EndTime:     endTime,
+		TokenUsage:  tokenUsage,
 	}
 
 	// Marshal request body
@@ -403,7 +444,7 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 
 	// Call the reporting API asynchronously
 	log.Infof("Reporting token usage to %s: requestId=%s, model=%s, userKey=%s, inputToken=%d, outputToken=%d, totalToken=%d, duration=%d",
-		config.reportApiUrl, requestID, model, userKey, inputTokenInt, outputTokenInt, totalTokenInt, duration)
+		config.reportApiUrl, requestID, model, userKey, inputTokens, outputTokens, totalTokens, duration)
 
 	// Use a simple callback that doesn't capture large variables
 	err = config.reportClient.Post(
@@ -422,11 +463,9 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		log.Errorf("Failed to dispatch token usage report call: %v", err)
 		return
 	}
-
-	log.Debugf("Token usage report initiated successfully for requestId: %s", requestID)
 }
 
-func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageReportConfig) {
+func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageReportConfig, responseBody []byte) {
 	// Add panic recovery to ensure this function never interrupts the main flow
 	defer func() {
 		if r := recover(); r != nil {
@@ -460,19 +499,17 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 	// Convert token values to uint64
 	inputTokens, ok := convertToUInt(inputTokenVal)
 	if !ok {
-		log.Debugf("InputToken conversion failed, skipping token usage report")
+		log.Warnf("InputToken conversion failed, skipping token usage report, model=%s, responseBody=%s", model, string(responseBody))
 		return
 	}
 
 	outputTokens, ok := convertToUInt(outputTokenVal)
 	if !ok {
-		log.Debugf("OutputToken conversion failed, skipping token usage report")
 		return
 	}
 
 	totalTokens, ok := convertToUInt(totalTokenVal)
 	if !ok {
-		log.Debugf("TotalToken conversion failed, skipping token usage report")
 		return
 	}
 
@@ -484,8 +521,27 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 		return
 	}
 
+	// Get start time from context
+	startTimeVal := ctx.GetContext(CtxRequestStart)
+	startTime, ok := convertToUInt(startTimeVal)
+	if !ok {
+		startTime = 0
+	}
+
+	// Get end time (current time)
+	endTime := time.Now().UnixMilli()
+
+	// Get tokenUsage JSON from context
+	tokenUsage := ""
+	if tokenUsageVal := ctx.GetContext(CtxTokenUsage); tokenUsageVal != nil {
+		if tokenUsageStr, ok := tokenUsageVal.(string); ok {
+			// 将驼峰命名转换为下划线命名
+			tokenUsage = convertCamelToSnakeJSON(tokenUsageStr)
+		}
+	}
+
 	// Call the report function (in a goroutine-like manner to avoid blocking)
-	reportTokenUsage(config, ctx, model, inputTokens, outputTokens, totalTokens, int64(duration))
+	reportTokenUsage(config, ctx, model, inputTokens, outputTokens, totalTokens, int64(duration), int64(startTime), endTime, tokenUsage)
 
 	// Clean up context to prevent memory leaks
 	ctx.SetContext(CtxRequestStart, nil)
@@ -494,7 +550,38 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 	ctx.SetContext(CtxKeyOutputToken, nil)
 	ctx.SetContext(CtxKeyTotalToken, nil)
 	ctx.SetContext(CtxFirstToken, nil)
+	ctx.SetContext(CtxTokenUsage, nil)
 	ctx.SetContext(LLMServiceDuration, nil)
+}
 
-	log.Debugf("ai-token-report: cleaned up context data after reporting")
+// convertCamelToSnakeJSON 将 JSON 字符串中第一层的驼峰命名转换为下划线命名
+// 例如：{"InputToken":123,"Inner":{"Key":"val"}} -> {"input_token":123,"Inner":{"Key":"val"}}
+func convertCamelToSnakeJSON(jsonStr string) string {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		// 解析失败，返回原字符串
+		return jsonStr
+	}
+
+	// 只转换第一层的 key
+	result := make(map[string]interface{})
+	for key, value := range data {
+		newKey := camelToSnake(key)
+		result[newKey] = value
+	}
+
+	output, _ := json.Marshal(result)
+	return string(output)
+}
+
+// camelToSnake 将驼峰命名转换为下划线命名
+func camelToSnake(s string) string {
+	var result []rune
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			result = append(result, '_')
+		}
+		result = append(result, r)
+	}
+	return strings.ToLower(string(result))
 }

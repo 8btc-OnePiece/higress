@@ -73,6 +73,7 @@ func parseConfig(json gjson.Result, config *ModelRouterConfig) error {
 			"/completions",
 			"/embeddings",
 			"/images/generations",
+			"/images/edits",
 			"/audio/speech",
 			"/fine_tuning/jobs",
 			"/moderations",

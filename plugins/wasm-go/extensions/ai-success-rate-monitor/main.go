@@ -1,0 +1,684 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
+	"github.com/tidwall/gjson"
+)
+
+const (
+	pluginName = "ai-success-rate-monitor"
+
+	// 上下文键
+	ctxKeyURI          = "uri"
+	ctxKeyModel        = "model"
+	ctxKeyProvider     = "provider"
+	ctxKeyAPIKey       = "apiKey"
+	ctxKeyRequestBody  = "requestBody"
+	ctxKeyStatusCode   = "statusCode"
+
+	// HTTP 头
+	OriginalAPIKey = "X-Original-Api-Key"
+
+	// 告警级别
+	alertLevelInfo     = "info"
+	alertLevelWarning  = "warning"
+	alertLevelError    = "error"
+	alertLevelCritical = "critical"
+)
+
+var (
+	pluginConfig PluginConfig
+)
+
+// PluginConfig 插件配置
+type PluginConfig struct {
+	// 钉钉机器人 Webhook URL
+	DingTalkWebhook string `json:"dingTalkWebhook"`
+
+	// 钉钉服务名称（用于集群客户端调用）
+	DingTalkServiceName string `json:"dingTalkServiceName"`
+
+	// 是否启用告警
+	EnableAlert bool `json:"enableAlert"`
+
+	// 告警级别 (4xx=warning, 5xx=error)
+	AlertLevelFor4xx string `json:"alertLevelFor4xx"`
+	AlertLevelFor5xx string `json:"alertLevelFor5xx"`
+
+	// 钉钉消息类型 (text, markdown)
+	MessageType string `json:"messageType"`
+
+	// 是否发送 atAll（@所有人）
+	AtAll bool `json:"atAll"`
+
+	// @的手机号列表
+	AtMobiles []string `json:"atMobiles"`
+
+	// HTTP 客户端（用于发送钉钉告警）
+	dingTalkClient wrapper.HttpClient
+}
+
+// DingTalkMessage 钉钉消息结构
+type DingTalkMessage struct {
+	MsgType string `json:"msgtype"`
+	Text    *struct {
+		Content string   `json:"content"`
+		AtList  []string `json:"atMobiles"`
+		AtAll   bool     `json:"isAtAll"`
+	} `json:"text,omitempty"`
+	Markdown *struct {
+		Title string `json:"title"`
+		Text  string `json:"text"`
+	} `json:"markdown,omitempty"`
+	At *struct {
+		AtMobiles []string `json:"atMobiles"`
+		IsAtAll   bool     `json:"isAtAll"`
+	} `json:"at,omitempty"`
+}
+
+// AlertInfo 告警信息
+type AlertInfo struct {
+	URI          string
+	Model        string
+	Provider     string
+	APIKey       string
+	HTTPCode     int
+	ErrorMessage string
+	Timestamp    string
+	AlertLevel   string
+}
+
+func main() {}
+
+func init() {
+	wrapper.SetCtx(
+		pluginName,
+		wrapper.ParseConfigBy(parseConfig),
+		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
+		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
+	)
+}
+
+// parseConfig 解析插件配置
+func parseConfig(json gjson.Result, config *PluginConfig, log log.Log) error {
+	if log != nil {
+		log.Infof("parsing config: %s", json.String())
+	}
+
+	// 解析钉钉 Webhook
+	config.DingTalkWebhook = json.Get("dingTalkWebhook").String()
+
+	// 解析钉钉服务名称
+	config.DingTalkServiceName = json.Get("dingTalkServiceName").String()
+	if config.DingTalkServiceName == "" {
+		config.DingTalkServiceName = "outbound" // 默认使用 outbound
+	}
+
+	// 解析启用标志
+	config.EnableAlert = json.Get("enableAlert").Bool()
+
+	// 解析告警级别
+	config.AlertLevelFor4xx = json.Get("alertLevelFor4xx").String()
+	if config.AlertLevelFor4xx == "" {
+		config.AlertLevelFor4xx = alertLevelWarning // 默认 warning
+	}
+
+	config.AlertLevelFor5xx = json.Get("alertLevelFor5xx").String()
+	if config.AlertLevelFor5xx == "" {
+		config.AlertLevelFor5xx = alertLevelError // 默认 error
+	}
+
+	// 解析其他配置
+	config.MessageType = json.Get("messageType").String()
+	if config.MessageType == "" {
+		config.MessageType = "markdown" // 默认 markdown
+	}
+
+	config.AtAll = json.Get("atAll").Bool()
+
+	// 解析 @手机号列表
+	atMobilesJson := json.Get("atMobiles")
+	if atMobilesJson.Exists() && atMobilesJson.IsArray() {
+		config.AtMobiles = make([]string, 0)
+		for _, mobile := range atMobilesJson.Array() {
+			config.AtMobiles = append(config.AtMobiles, mobile.String())
+		}
+	}
+
+	// 如果配置了钉钉 Webhook，创建 HTTP 客户端
+	if config.DingTalkWebhook != "" {
+		// 解析 URL 获取主机和端口
+		parsedUrl, err := url.Parse(config.DingTalkWebhook)
+		if err != nil {
+			log.Errorf("failed to parse dingtalk webhook url: %v", err)
+			return fmt.Errorf("invalid dingTalkWebhook: %v", err)
+		}
+
+		actualHost := parsedUrl.Hostname()
+		if actualHost == "" {
+			return fmt.Errorf("invalid dingTalkWebhook: missing hostname")
+		}
+
+		port := int64(443) // 钉钉使用 HTTPS
+		if actualPort := parsedUrl.Port(); actualPort != "" {
+			if p, err := strconv.Atoi(actualPort); err == nil {
+				port = int64(p)
+			}
+		}
+
+		// 创建 HTTP 客户端用于发送钉钉告警
+		config.dingTalkClient = wrapper.NewClusterClient(wrapper.DnsCluster{
+			ServiceName: config.DingTalkServiceName,
+			Domain:      actualHost,
+			Port:        port,
+		})
+
+		log.Infof("created dingtalk client: service=%s, domain=%s, port=%d",
+			config.DingTalkServiceName, actualHost, port)
+	}
+
+	pluginConfig = *config
+
+	if log != nil {
+		log.Infof("config loaded: enableAlert=%v, webhook=%s, messageType=%s",
+			config.EnableAlert, config.DingTalkWebhook, config.MessageType)
+	}
+
+	return nil
+}
+
+// onHttpRequestHeaders 处理请求头
+func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.Log) types.Action {
+	ctx.DisableReroute()
+
+	// 获取请求 URI
+	uri, err := proxywasm.GetHttpRequestHeader(":path")
+	if err != nil {
+		log.Errorf("failed to get request path: %v", err)
+		return types.ActionContinue
+	}
+	ctx.SetContext(ctxKeyURI, uri)
+
+	// 获取模型名称
+	model := getModelFromRequest(ctx)
+	if model != "" {
+		ctx.SetContext(ctxKeyModel, model)
+		log.Debugf("got model: %s", model)
+	}
+
+	// 获取 API Key
+	apiKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
+	if err == nil && apiKey != "" {
+		ctx.SetContext(ctxKeyAPIKey, apiKey)
+		log.Debugf("got api key: %s", maskAPIKey(apiKey))
+	}
+
+	// 获取 Provider (从 cluster_name)
+	provider := getClusterName(ctx)
+	if provider != "" {
+		ctx.SetContext(ctxKeyProvider, provider)
+		log.Debugf("got provider: %s", provider)
+	}
+
+
+	return types.ActionContinue
+}
+
+// onHttpResponseHeaders 处理响应头
+func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.Log) types.Action {
+	if !wrapper.IsResponseFromUpstream() {
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
+
+	// 检查 HTTP 状态码
+	statusCodeStr, err := proxywasm.GetHttpResponseHeader(":status")
+	if err != nil {
+		// 在某些情况下（如本地响应），:status 可能不可用，这是正常的
+		log.Debugf("failed to get response status code: %v", err)
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
+
+	statusCode, err := strconv.Atoi(statusCodeStr)
+	if err != nil {
+		log.Debugf("failed to parse status code: %v, value: %q", err, statusCodeStr)
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
+
+	// 将状态码存入上下文，供 onHttpResponseBody 使用
+	ctx.SetContext(ctxKeyStatusCode, statusCode)
+
+	// 如果是 4xx 或 5xx，需要读取响应体获取错误消息
+	if isErrorCode(statusCode) && config.EnableAlert {
+		ctx.SetResponseBodyBufferLimit(10 * 1024) // 限制 10KB
+		return types.ActionContinue
+	}
+
+	ctx.DontReadResponseBody()
+	return types.ActionContinue
+}
+
+// onHttpResponseBody 处理响应体
+func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte, log log.Log) types.Action {
+	if !wrapper.IsResponseFromUpstream() {
+		return types.ActionContinue
+	}
+
+	// 从上下文获取状态码（由 onHttpResponseHeaders 设置）
+	statusCodeCtx := ctx.GetContext(ctxKeyStatusCode)
+	if statusCodeCtx == nil {
+		// 如果上下文中没有状态码，说明不需要发送告警
+		return types.ActionContinue
+	}
+
+	statusCode, ok := statusCodeCtx.(int)
+	if !ok {
+		log.Debugf("invalid status code type in context: %T", statusCodeCtx)
+		return types.ActionContinue
+	}
+
+	// 检查是否需要发送告警
+	if !isErrorCode(statusCode) {
+		return types.ActionContinue
+	}
+
+	if !config.EnableAlert {
+		log.Debugf("alert is disabled, skip sending alert")
+		return types.ActionContinue
+	}
+
+	// 构建告警信息
+	alertInfo := buildAlertInfo(ctx, statusCode, body, log)
+
+	log.Infof("triggering dingtalk alert for status code %d", statusCode)
+
+	// 发送钉钉告警（DispatchHttpCall 本身是异步的，不需要 go 关键字）
+	sendDingTalkAlert(alertInfo, config, log)
+
+	return types.ActionContinue
+}
+
+// buildAlertInfo 构建告警信息
+func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log log.Log) AlertInfo {
+	info := AlertInfo{
+		Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
+		HTTPCode:   statusCode,
+		AlertLevel: getAlertLevel(statusCode),
+	}
+
+	// 获取 URI
+	if uri, ok := ctx.GetContext(ctxKeyURI).(string); ok {
+		info.URI = uri
+	}
+
+	// 获取 Model
+	if model, ok := ctx.GetContext(ctxKeyModel).(string); ok {
+		info.Model = model
+	}
+
+	// 获取 Provider
+	if provider, ok := ctx.GetContext(ctxKeyProvider).(string); ok {
+		info.Provider = provider
+	}
+
+	// 获取 API Key
+	if apiKey, ok := ctx.GetContext(ctxKeyAPIKey).(string); ok {
+		info.APIKey = maskAPIKey(apiKey)
+	}
+
+	// 获取错误消息
+	if len(body) > 0 {
+		info.ErrorMessage = extractErrorMessage(body)
+	} else {
+		info.ErrorMessage = fmt.Sprintf("HTTP %d Error", statusCode)
+	}
+
+	return info
+}
+
+// sendDingTalkAlert 发送钉钉告警
+func sendDingTalkAlert(info AlertInfo, config PluginConfig, log log.Log) error {
+	log.Infof("sendDingTalkAlert called, webhook=%s, enableAlert=%v",
+		maskWebhook(config.DingTalkWebhook), config.EnableAlert)
+
+	if config.DingTalkWebhook == "" {
+		log.Errorf("dingtalk webhook is empty")
+		return fmt.Errorf("dingtalk webhook is empty")
+	}
+
+	if config.dingTalkClient == nil {
+		log.Errorf("dingtalk client is not initialized")
+		return fmt.Errorf("dingtalk client is not initialized")
+	}
+
+	log.Infof("building dingtalk message, messageType=%s", config.MessageType)
+
+	// 构建消息
+	var message DingTalkMessage
+
+	if config.MessageType == "markdown" {
+		message = buildMarkdownMessage(info, config)
+	} else {
+		message = buildTextMessage(info, config)
+	}
+
+	// 序列化为 JSON
+	jsonData, err := json.Marshal(message)
+	if err != nil {
+		log.Errorf("failed to marshal message: %v", err)
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	// 解析请求路径
+	parsedUrl, err := url.Parse(config.DingTalkWebhook)
+	if err != nil {
+		log.Errorf("failed to parse dingtalk webhook url: %v", err)
+		return fmt.Errorf("failed to parse webhook url: %w", err)
+	}
+
+	requestPath := parsedUrl.Path
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if parsedUrl.RawQuery != "" {
+		requestPath += "?" + parsedUrl.RawQuery
+	}
+
+	// 使用集群客户端发送 POST 请求
+	err = config.dingTalkClient.Post(
+		requestPath,
+		[][2]string{{"Content-Type", "application/json"}},
+		jsonData,
+		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+			handleDingTalkResponse(statusCode, responseBody, log)
+		},
+		1000, // 1秒超时
+	)
+
+	if err != nil {
+		log.Errorf("failed to send dingtalk request: %v", err)
+		return fmt.Errorf("failed to send dingtalk request: %w", err)
+	}
+
+	log.Infof("dingtalk request initiated successfully")
+	return nil
+}
+
+// handleDingTalkResponse 处理钉钉响应
+func handleDingTalkResponse(statusCode int, responseBody []byte, log log.Log) {
+	if statusCode >= 200 && statusCode < 300 {
+		log.Infof("dingtalk alert sent successfully, status=%d", statusCode)
+	} else {
+		log.Errorf("dingtalk alert failed, status=%d, body=%s", statusCode, string(responseBody))
+	}
+}
+
+// buildMarkdownMessage 构建 Markdown 格式消息
+func buildMarkdownMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
+	// 确定告警图标
+	levelIcon := getLevelIcon(info.AlertLevel)
+
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("### %s API调用失败告警\n\n", levelIcon))
+	content.WriteString(fmt.Sprintf("**告警级别**: <%s>\n\n", info.AlertLevel))
+	content.WriteString(fmt.Sprintf("**时间**: %s\n\n", info.Timestamp))
+	content.WriteString(fmt.Sprintf("**接口URI**: %s\n\n", info.URI))
+	content.WriteString(fmt.Sprintf("**请求状态码**: %d\n\n", info.HTTPCode))
+
+	if info.Model != "" {
+		content.WriteString(fmt.Sprintf("**请求Model**: %s\n\n", info.Model))
+	}
+
+	if info.Provider != "" {
+		content.WriteString(fmt.Sprintf("**Model Provider**: %s\n\n", info.Provider))
+	}
+
+	if info.APIKey != "" {
+		content.WriteString(fmt.Sprintf("**API Key**: %s\n\n", info.APIKey))
+	}
+
+	if info.ErrorMessage != "" {
+		// 转义 Markdown 特殊字符
+		escapedMsg := escapeMarkdown(info.ErrorMessage)
+		content.WriteString(fmt.Sprintf("**错误信息**: %s\n\n", escapedMsg))
+	}
+
+	message := DingTalkMessage{
+		MsgType: "markdown",
+		Markdown: &struct {
+			Title string `json:"title"`
+			Text  string `json:"text"`
+		}{
+			Title: fmt.Sprintf("API失败告警 - %d", info.HTTPCode),
+			Text:  content.String(),
+		},
+	}
+
+	// 添加 @ 信息
+	if config.AtAll || len(config.AtMobiles) > 0 {
+		message.At = &struct {
+			AtMobiles []string `json:"atMobiles"`
+			IsAtAll   bool     `json:"isAtAll"`
+		}{
+			AtMobiles: config.AtMobiles,
+			IsAtAll:   config.AtAll,
+		}
+	}
+
+	return message
+}
+
+// buildTextMessage 构建文本格式消息
+func buildTextMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("【API调用失败告警】\n"))
+	content.WriteString(fmt.Sprintf("告警级别: %s\n", info.AlertLevel))
+	content.WriteString(fmt.Sprintf("接口URI: %s\n", info.URI))
+	content.WriteString(fmt.Sprintf("请求状态码: %d\n", info.HTTPCode))
+
+	if info.Model != "" {
+		content.WriteString(fmt.Sprintf("请求Model: %s\n", info.Model))
+	}
+
+	if info.Provider != "" {
+		content.WriteString(fmt.Sprintf("Model Provider: %s\n", info.Provider))
+	}
+
+	if info.APIKey != "" {
+		content.WriteString(fmt.Sprintf("API Key: %s\n", info.APIKey))
+	}
+
+	if info.ErrorMessage != "" {
+		content.WriteString(fmt.Sprintf("错误信息: %s\n", info.ErrorMessage))
+	}
+
+	// 添加 @ 信息
+	if config.AtAll {
+		content.WriteString(" @all")
+	} else if len(config.AtMobiles) > 0 {
+		for _, mobile := range config.AtMobiles {
+			content.WriteString(fmt.Sprintf(" @%s", mobile))
+		}
+	}
+
+	message := DingTalkMessage{
+		MsgType: "text",
+		Text: &struct {
+			Content string   `json:"content"`
+			AtList  []string `json:"atMobiles"`
+			AtAll   bool     `json:"isAtAll"`
+		}{
+			Content: content.String(),
+			AtAll:   config.AtAll,
+		},
+	}
+
+	return message
+}
+
+// getModelFromRequest 从请求中获取模型名称
+func getModelFromRequest(ctx wrapper.HttpContext) string {
+	// 优先从 Envoy 属性中获取（由之前的插件设置）
+	if requestModel, err := proxywasm.GetProperty([]string{"wasm.requestModel"}); err == nil {
+		model := string(requestModel)
+		if model != "" {
+			log.Debugf("got model from wasm.requestModel: %s", model)
+			return model
+		}
+	}
+
+	return ""
+}
+
+// getClusterName 获取当前路由的服务提供者名称（cluster_name）
+func getClusterName(ctx wrapper.HttpContext) string {
+	if raw, err := proxywasm.GetProperty([]string{"cluster_name"}); err == nil {
+		clusterName := string(raw)
+		if clusterName != "" {
+			log.Debugf("got cluster name: %s", clusterName)
+
+			// cluster_name 格式: outbound|443||llm-RightCodes.internal.dns
+			// 提取服务名称部分
+			parts := strings.Split(clusterName, "||")
+			if len(parts) >= 2 {
+				serviceName := parts[1]
+
+				// 移除 llm- 前缀
+				serviceName = strings.TrimPrefix(serviceName, "llm-")
+
+				// 提取第一个点之前的部分
+				if idx := strings.Index(serviceName, "."); idx > 0 {
+					serviceName = serviceName[:idx]
+				}
+
+				log.Debugf("extracted provider name: %s", serviceName)
+				return serviceName
+			}
+		}
+	}
+	return ""
+}
+
+// isErrorCode 检查是否是错误状态码
+func isErrorCode(statusCode int) bool {
+	return statusCode >= 400 && statusCode < 600
+}
+
+// getAlertLevel 根据状态码获取告警级别
+func getAlertLevel(statusCode int) string {
+	if statusCode >= 400 && statusCode < 500 {
+		return pluginConfig.AlertLevelFor4xx
+	}
+	if statusCode >= 500 && statusCode < 600 {
+		return pluginConfig.AlertLevelFor5xx
+	}
+	return alertLevelInfo
+}
+
+// getLevelIcon 获取告警级别图标
+func getLevelIcon(level string) string {
+	switch level {
+	case alertLevelCritical:
+		return "🔴"
+	case alertLevelError:
+		return "🟠"
+	case alertLevelWarning:
+		return "🟡"
+	default:
+		return "🟢"
+	}
+}
+
+// maskAPIKey 掩码 API Key
+func maskAPIKey(apiKey string) string {
+	if len(apiKey) <= 8 {
+		return "****"
+	}
+	return apiKey[:6] + "****" + apiKey[len(apiKey)-6:]
+}
+
+// maskWebhook 掩码 Webhook URL
+func maskWebhook(webhook string) string {
+	if webhook == "" {
+		return ""
+	}
+	// 只显示协议和主机名，隐藏路径和 access_token
+	if idx := strings.Index(webhook, "/send"); idx > 0 {
+		return webhook[:idx] + "/send***"
+	}
+	// 如果找不到 /send，返回前 50 个字符
+	if len(webhook) > 50 {
+		return webhook[:50] + "***"
+	}
+	return webhook[:len(webhook)/2] + "***"
+}
+
+// extractErrorMessage 从响应体中提取错误消息
+func extractErrorMessage(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	// 尝试解析 JSON
+	jsonData := gjson.ParseBytes(body)
+
+	// 尝试获取常见的错误字段
+	errorFields := []string{"error.message", "message", "error", "msg", "error.msg"}
+	for _, field := range errorFields {
+		if value := jsonData.Get(field); value.Exists() && value.String() != "" {
+			msg := value.String()
+			// 限制消息长度
+			if len(msg) > 100 {
+				return msg[:100] + "...(truncated)"
+			}
+			return msg
+		}
+	}
+
+	// 如果无法解析，返回原始内容（限制长度）
+	bodyStr := string(body)
+	if len(bodyStr) > 100 {
+		return bodyStr[:100] + "...(truncated)"
+	}
+	return bodyStr
+}
+
+// escapeMarkdown 转义 Markdown 特殊字符
+func escapeMarkdown(s string) string {
+	// 转义 Markdown 特殊字符
+	replacer := strings.NewReplacer(
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(s)
+}

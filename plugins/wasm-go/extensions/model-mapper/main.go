@@ -105,6 +105,7 @@ func parseConfig(json gjson.Result, config *Config) error {
 			"/completions",
 			"/embeddings",
 			"/images/generations",
+			"/images/edits",
 			"/audio/speech",
 			"/fine_tuning/jobs",
 			"/moderations",
@@ -112,6 +113,7 @@ func parseConfig(json gjson.Result, config *Config) error {
 			"/video-synthesis",
 			"/rerank",
 			"/messages",
+
 		}
 	}
 
@@ -162,6 +164,9 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config Config, body []byte) type
 	}
 
 	oldModel := gjson.GetBytes(body, config.modelKey).String()
+
+    propertyKey := "wasm.requestModel"
+    _ = proxywasm.SetProperty([]string{propertyKey}, []byte(oldModel))
 
 	newModel := config.defaultModel
 	if newModel == "" {

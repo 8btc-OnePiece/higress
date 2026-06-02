@@ -817,7 +817,7 @@ func setAttributeBySource(ctx wrapper.HttpContext, config AIStatisticsConfig, so
 			}
 		}
 
-		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
+// 		log.Debugf("[attribute] source type: %s, key: %s, value: %+v", source, key, formattedValue)
 		if attribute.ApplyToLog {
 			if attribute.AsSeparateLogField {
 				var marshalledJsonStr string
@@ -1100,8 +1100,8 @@ func debugLogAiLog(ctx wrapper.HttpContext) {
 	}
 
 	// Log the attributes as JSON
-	logJson, _ := json.Marshal(userAttrs)
-	log.Debugf("[ai_log] attributes to be written: %s", string(logJson))
+// 	logJson, _ := json.Marshal(userAttrs)
+// 	log.Debugf("[ai_log] attributes to be written: %s", string(logJson))
 }
 
 // Set the tracing span with value.

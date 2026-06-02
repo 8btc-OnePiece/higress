@@ -1,0 +1,11 @@
+{
+  "dingTalkWebhook": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_ACCESS_TOKEN",
+  "dingTalkServiceName": "outbound",
+  "enableAlert": true,
+  "alertLevelFor4xx": "warning",
+  "alertLevelFor5xx": "error",
+  "includeRequestBody": false,
+  "messageType": "markdown",
+  "atAll": false,
+  "atMobiles": []
+}
