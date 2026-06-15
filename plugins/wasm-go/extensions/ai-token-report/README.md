@@ -11,7 +11,7 @@ AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定�
 - ✅ **异步上报**：非阻塞式上报，不影响主流程性能
 - ✅ **配置化**：支持配置上报 API 地址、服务名、超时时间
 - ✅ **错误处理**：内置 panic recovery，确保上报失败不会影响主流程
-- ✅ **ID 生成**：优先使用 Envoy request ID，否则生成唯一 ID
+- ✅ **ID 生成**：优先使用有效 Envoy request ID（非空且不为 `-`），否则生成唯一 ID
 
 ## 配置说明
 
@@ -67,7 +67,7 @@ AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定�
 
 | 字段名 | 类型 | 说明 |
 |---------|------|------|
-| `requestId` | string | 请求唯一 ID，格式：`{random8位}{timestamp毫秒}` 或使用 Envoy request ID |
+| `requestId` | string | 请求唯一 ID，格式：`{random8位}{timestamp毫秒}` 或使用有效 Envoy request ID（非空且不为 `-`） |
 | `model` | string | 模型名称（从请求体中提取） |
 | `userKey` | string | 用户 Key（从 `X-Original-Api-Key` header 获取） |
 | `inputToken` | integer | 输入 token 数 |

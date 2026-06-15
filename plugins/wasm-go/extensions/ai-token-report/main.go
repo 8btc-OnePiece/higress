@@ -24,13 +24,13 @@ const (
 	defaultReportTimeout int32 = 5000 // 5 seconds
 
 	// Context keys
-	CtxKeyModel      = "token_model"
-	CtxKeyInputToken = "token_input"
+	CtxKeyModel       = "token_model"
+	CtxKeyInputToken  = "token_input"
 	CtxKeyOutputToken = "token_output"
 	CtxKeyTotalToken  = "token_total"
-	CtxRequestStart    = "request_start_time"
+	CtxRequestStart   = "request_start_time"
 	CtxFirstToken     = "first_token_time"
-	CtxTokenUsage      = "token_usage_raw"
+	CtxTokenUsage     = "token_usage_raw"
 	CtxSkipPlugin     = "skip_token_report"
 	providerTypeKey   = "providerType"
 
@@ -61,10 +61,10 @@ type TokenUsageReportRequest struct {
 
 // TokenUsageReportConfig holds the configuration for token usage reporting
 type TokenUsageReportConfig struct {
-	reportClient      wrapper.HttpClient
-	reportApiUrl      string
-	reportServiceName string
-	reportTimeout     int32
+	reportClient       wrapper.HttpClient
+	reportApiUrl       string
+	reportServiceName  string
+	reportTimeout      int32
 	disableOpenaiUsage bool
 }
 
@@ -207,7 +207,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, b
 		}
 	}
 
-    // 如果 model 为空，则跳过读取响应体
+	// 如果 model 为空，则跳过读取响应体
 	if model == "" {
 		log.Debugf("ai-token-report: request model is empty, skipping response body read")
 		ctx.DontReadResponseBody()
@@ -232,6 +232,23 @@ func getRequestModel() string {
 	return ""
 }
 
+func getEnvoyRequestID() string {
+	requestIDValue, err := proxywasm.GetProperty([]string{"request", "id"})
+	if err != nil {
+		return ""
+	}
+
+	return normalizeEnvoyRequestID(string(requestIDValue))
+}
+
+func normalizeEnvoyRequestID(value string) string {
+	requestID := strings.TrimSpace(value)
+	if requestID == "" || requestID == "-" {
+		return ""
+	}
+	return requestID
+}
+
 func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, data []byte, endOfStream bool) []byte {
 	// 检查是否设置了跳过标记
 	if ctx.GetContext(CtxSkipPlugin) != nil {
@@ -251,7 +268,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-// 			ctx.SetContext(CtxKeyModel, usage.Model)
+			// 			ctx.SetContext(CtxKeyModel, usage.Model)
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
@@ -308,7 +325,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-// 			ctx.SetContext(CtxKeyModel, usage.Model)
+			// 			ctx.SetContext(CtxKeyModel, usage.Model)
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
@@ -367,7 +384,7 @@ func convertToUInt(val interface{}) (uint64, bool) {
 }
 
 func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, model string, inputTokens, outputTokens,
-                      totalTokens uint64, duration int64, startTime, endTime int64, tokenUsage string) {
+	totalTokens uint64, duration int64, startTime, endTime int64, tokenUsage string) {
 	// Add panic recovery to ensure reporting never crashes the main flow
 	defer func() {
 		if r := recover(); r != nil {
@@ -388,17 +405,9 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		return
 	}
 
-	// Get Envoy request ID from property
-	envoyRequestID := ""
-	if requestIDValue, err := proxywasm.GetProperty([]string{"request", "id"}); err == nil {
-		envoyRequestID = string(requestIDValue)
-		if envoyRequestID != "" && envoyRequestID != "-" {
-			log.Debugf("Using Envoy request ID: %s", envoyRequestID)
-		}
-	}
-
 	timestamp := time.Now().UnixMilli()
 	var requestID string
+	envoyRequestID := getEnvoyRequestID()
 	if envoyRequestID != "" {
 		requestID = envoyRequestID
 		log.Debugf("reportTokenUsage using Envoy request ID: %s", envoyRequestID)
