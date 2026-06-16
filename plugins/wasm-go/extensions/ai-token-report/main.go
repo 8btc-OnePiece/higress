@@ -232,16 +232,21 @@ func getRequestModel() string {
 	return ""
 }
 
-func getEnvoyRequestID() string {
-	requestIDValue, err := proxywasm.GetProperty([]string{"request", "id"})
-	if err != nil {
-		return ""
+func getRequestID() string {
+	if value, err := proxywasm.GetProperty([]string{"x_request_id"}); err == nil {
+		if requestID := normalizeRequestID(string(value)); requestID != "" {
+			return requestID
+		}
 	}
 
-	return normalizeEnvoyRequestID(string(requestIDValue))
+	if value, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		return normalizeRequestID(value)
+	}
+
+	return ""
 }
 
-func normalizeEnvoyRequestID(value string) string {
+func normalizeRequestID(value string) string {
 	requestID := strings.TrimSpace(value)
 	if requestID == "" || requestID == "-" {
 		return ""
@@ -407,10 +412,10 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 
 	timestamp := time.Now().UnixMilli()
 	var requestID string
-	envoyRequestID := getEnvoyRequestID()
-	if envoyRequestID != "" {
-		requestID = envoyRequestID
-		log.Debugf("reportTokenUsage using Envoy request ID: %s", envoyRequestID)
+	upstreamRequestID := getRequestID()
+	if upstreamRequestID != "" {
+		requestID = upstreamRequestID
+		log.Debugf("reportTokenUsage using upstream request ID: %s", upstreamRequestID)
 	} else {
 		randomSuffix := generateRandomString(8)
 		requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)

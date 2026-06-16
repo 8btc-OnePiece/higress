@@ -16,33 +16,39 @@ var emptyConfig = func() json.RawMessage {
 
 func TestOnHttpResponseHeaders(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
-		t.Run("sets request_id from Envoy request ID", func(t *testing.T) {
+		t.Run("sets request_id from x_request_id", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte("envoy-req-123")))
+			require.NoError(t, host.SetRequestId("x-req-123"))
 
 			action := host.CallOnHttpResponseHeaders([][2]string{
 				{":status", "200"},
 			})
 
 			require.Equal(t, types.ActionContinue, action)
-			require.True(t, test.HasHeaderWithValue(host.GetResponseHeaders(), requestIDHeader, "envoy-req-123"))
+			require.True(t, test.HasHeaderWithValue(host.GetResponseHeaders(), requestIDHeader, "x-req-123"))
 			host.CompleteHttp()
 		})
 
-		t.Run("skips empty request ID", func(t *testing.T) {
+		t.Run("falls back to x-request-id header", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{"x-request-id", "header-req-123"},
+			}))
+			require.NoError(t, host.SetRequestId("-"))
 
 			action := host.CallOnHttpResponseHeaders([][2]string{
 				{":status", "200"},
 			})
 
 			require.Equal(t, types.ActionContinue, action)
-			require.False(t, test.HasHeader(host.GetResponseHeaders(), requestIDHeader))
+			require.True(t, test.HasHeaderWithValue(host.GetResponseHeaders(), requestIDHeader, "header-req-123"))
 			host.CompleteHttp()
 		})
 
@@ -51,7 +57,10 @@ func TestOnHttpResponseHeaders(t *testing.T) {
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte("-")))
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+			}))
+			require.NoError(t, host.SetRequestId("-"))
 
 			action := host.CallOnHttpResponseHeaders([][2]string{
 				{":status", "200"},
@@ -64,23 +73,46 @@ func TestOnHttpResponseHeaders(t *testing.T) {
 	})
 }
 
-func TestGetEnvoyRequestID(t *testing.T) {
+func TestGetRequestID(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
+		t.Run("returns x_request_id", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.NoError(t, host.SetRequestId("x-req-123"))
+			require.Equal(t, "x-req-123", getRequestID())
+		})
+
+		t.Run("falls back to header when property is unusable", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{"x-request-id", "header-req-456"},
+			}))
+			require.NoError(t, host.SetRequestId("-"))
+			require.Equal(t, "header-req-456", getRequestID())
+			host.CompleteHttp()
+		})
+
 		t.Run("trims whitespace", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte(" envoy-req-456 ")))
-			require.Equal(t, "envoy-req-456", getEnvoyRequestID())
+			require.NoError(t, host.SetRequestId(" x-req-456 "))
+			require.Equal(t, "x-req-456", getRequestID())
 		})
 	})
 }
 
-func TestNormalizeEnvoyRequestID(t *testing.T) {
-	require.Equal(t, "envoy-req-123", normalizeEnvoyRequestID("envoy-req-123"))
-	require.Equal(t, "envoy-req-456", normalizeEnvoyRequestID(" envoy-req-456 "))
-	require.Empty(t, normalizeEnvoyRequestID(""))
-	require.Empty(t, normalizeEnvoyRequestID("   "))
-	require.Empty(t, normalizeEnvoyRequestID("-"))
+func TestNormalizeRequestID(t *testing.T) {
+	require.Equal(t, "req-123", normalizeRequestID("req-123"))
+	require.Equal(t, "req-456", normalizeRequestID(" req-456 "))
+	require.Empty(t, normalizeRequestID(""))
+	require.Empty(t, normalizeRequestID("   "))
+	require.Empty(t, normalizeRequestID("-"))
 }

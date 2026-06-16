@@ -23,7 +23,7 @@ func init() {
 }
 
 func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfig) types.Action {
-	requestID := getEnvoyRequestID()
+	requestID := getRequestID()
 	if requestID == "" {
 		return types.ActionContinue
 	}
@@ -35,17 +35,21 @@ func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfi
 	return types.ActionContinue
 }
 
-func getEnvoyRequestID() string {
-	value, err := proxywasm.GetProperty([]string{"request", "id"})
-	if err != nil {
-		log.Debugf("ai-request-id-response-header: failed to get Envoy request ID: %v", err)
-		return ""
+func getRequestID() string {
+	if value, err := proxywasm.GetProperty([]string{"x_request_id"}); err == nil {
+		if requestID := normalizeRequestID(string(value)); requestID != "" {
+			return requestID
+		}
 	}
 
-	return normalizeEnvoyRequestID(string(value))
+	if value, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		return normalizeRequestID(value)
+	}
+
+	return ""
 }
 
-func normalizeEnvoyRequestID(value string) string {
+func normalizeRequestID(value string) string {
 	requestID := strings.TrimSpace(value)
 	if requestID == "" || requestID == "-" {
 		return ""

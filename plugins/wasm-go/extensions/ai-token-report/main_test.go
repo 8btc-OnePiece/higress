@@ -14,32 +14,42 @@ var emptyConfig = func() json.RawMessage {
 	return data
 }()
 
-func TestGetEnvoyRequestID(t *testing.T) {
+func TestGetRequestID(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
-		t.Run("returns valid Envoy request ID", func(t *testing.T) {
+		t.Run("returns x_request_id property", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte("envoy-req-123")))
-			require.Equal(t, "envoy-req-123", getEnvoyRequestID())
+			require.NoError(t, host.SetRequestId("x-req-123"))
+			require.Equal(t, "x-req-123", getRequestID())
 		})
 
-		t.Run("returns empty for empty Envoy request ID", func(t *testing.T) {
+		t.Run("falls back to x-request-id header", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.Empty(t, getEnvoyRequestID())
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{"x-request-id", "header-req-123"},
+			}))
+			require.NoError(t, host.SetRequestId("-"))
+			require.Equal(t, "header-req-123", getRequestID())
+			host.CompleteHttp()
 		})
 
-		t.Run("returns empty for dash Envoy request ID", func(t *testing.T) {
+		t.Run("returns empty for dash request ID", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte("-")))
-			require.Empty(t, getEnvoyRequestID())
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+			}))
+			require.NoError(t, host.SetRequestId("-"))
+			require.Empty(t, getRequestID())
+			host.CompleteHttp()
 		})
 
 		t.Run("trims whitespace", func(t *testing.T) {
@@ -47,16 +57,16 @@ func TestGetEnvoyRequestID(t *testing.T) {
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetProperty([]string{"request", "id"}, []byte(" envoy-req-456 ")))
-			require.Equal(t, "envoy-req-456", getEnvoyRequestID())
+			require.NoError(t, host.SetRequestId(" x-req-456 "))
+			require.Equal(t, "x-req-456", getRequestID())
 		})
 	})
 }
 
-func TestNormalizeEnvoyRequestID(t *testing.T) {
-	require.Equal(t, "envoy-req-123", normalizeEnvoyRequestID("envoy-req-123"))
-	require.Equal(t, "envoy-req-456", normalizeEnvoyRequestID(" envoy-req-456 "))
-	require.Empty(t, normalizeEnvoyRequestID(""))
-	require.Empty(t, normalizeEnvoyRequestID("   "))
-	require.Empty(t, normalizeEnvoyRequestID("-"))
+func TestNormalizeRequestID(t *testing.T) {
+	require.Equal(t, "req-123", normalizeRequestID("req-123"))
+	require.Equal(t, "req-456", normalizeRequestID(" req-456 "))
+	require.Empty(t, normalizeRequestID(""))
+	require.Empty(t, normalizeRequestID("   "))
+	require.Empty(t, normalizeRequestID("-"))
 }
