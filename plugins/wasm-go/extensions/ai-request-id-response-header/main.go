@@ -9,7 +9,7 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 )
 
-const requestIDHeader = "request_id"
+const requestIDHeader = "request-id"
 
 type RequestIDResponseHeaderConfig struct{}
 
