@@ -89,12 +89,14 @@ type DingTalkMessage struct {
 
 // AlertInfo 告警信息
 type AlertInfo struct {
+	RequestID    string
 	URI          string
 	Model        string
 	Provider     string
 	APIKey       string
 	HTTPCode     int
 	ErrorMessage string
+	ResponseBody string // 响应原报文
 	Timestamp    string
 	AlertLevel   string
 }
@@ -221,7 +223,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.
 	// 获取 API Key
 	apiKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
 	if err == nil && apiKey != "" {
-		ctx.SetContext(ctxKeyAPIKey, apiKey)
+		ctx.SetContext(OriginalAPIKey, apiKey)
 		log.Debugf("got api key: %s", maskAPIKey(apiKey))
 	}
 
@@ -314,10 +316,14 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 
 // buildAlertInfo 构建告警信息
 func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log log.Log) AlertInfo {
+	alertLevel := getAlertLevel(statusCode)
+	requestID := getRequestID()
+
 	info := AlertInfo{
+		RequestID:  requestID,
 		Timestamp:  time.Now().Format("2006-01-02 15:04:05"),
 		HTTPCode:   statusCode,
-		AlertLevel: getAlertLevel(statusCode),
+		AlertLevel: alertLevel,
 	}
 
 	// 获取 URI
@@ -336,13 +342,21 @@ func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log lo
 	}
 
 	// 获取 API Key
-	if apiKey, ok := ctx.GetContext(ctxKeyAPIKey).(string); ok {
+	if apiKey, ok := ctx.GetContext(OriginalAPIKey).(string); ok {
 		info.APIKey = maskAPIKey(apiKey)
 	}
 
-	// 获取错误消息
+	// 获取错误消息和响应原报文
 	if len(body) > 0 {
 		info.ErrorMessage = extractErrorMessage(body)
+		// 保存响应原报文（限制长度）
+		bodyStr := string(body)
+		maxBodyLength := 2000 // 限制响应报文最大长度
+		if len(bodyStr) > maxBodyLength {
+			info.ResponseBody = bodyStr[:maxBodyLength] + "...(truncated)"
+		} else {
+			info.ResponseBody = bodyStr
+		}
 	} else {
 		info.ErrorMessage = fmt.Sprintf("HTTP %d Error", statusCode)
 	}
@@ -352,9 +366,6 @@ func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log lo
 
 // sendDingTalkAlert 发送钉钉告警
 func sendDingTalkAlert(info AlertInfo, config PluginConfig, log log.Log) error {
-	log.Infof("sendDingTalkAlert called, webhook=%s, enableAlert=%v",
-		maskWebhook(config.DingTalkWebhook), config.EnableAlert)
-
 	if config.DingTalkWebhook == "" {
 		log.Errorf("dingtalk webhook is empty")
 		return fmt.Errorf("dingtalk webhook is empty")
@@ -364,8 +375,6 @@ func sendDingTalkAlert(info AlertInfo, config PluginConfig, log log.Log) error {
 		log.Errorf("dingtalk client is not initialized")
 		return fmt.Errorf("dingtalk client is not initialized")
 	}
-
-	log.Infof("building dingtalk message, messageType=%s", config.MessageType)
 
 	// 构建消息
 	var message DingTalkMessage
@@ -414,7 +423,6 @@ func sendDingTalkAlert(info AlertInfo, config PluginConfig, log log.Log) error {
 		return fmt.Errorf("failed to send dingtalk request: %w", err)
 	}
 
-	log.Infof("dingtalk request initiated successfully")
 	return nil
 }
 
@@ -434,10 +442,13 @@ func buildMarkdownMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 
 	var content strings.Builder
 	content.WriteString(fmt.Sprintf("### %s API调用失败告警\n\n", levelIcon))
-	content.WriteString(fmt.Sprintf("**告警级别**: <%s>\n\n", info.AlertLevel))
-	content.WriteString(fmt.Sprintf("**时间**: %s\n\n", info.Timestamp))
+	content.WriteString(fmt.Sprintf("**告警级别**: %s\n\n", info.AlertLevel))
 	content.WriteString(fmt.Sprintf("**接口URI**: %s\n\n", info.URI))
 	content.WriteString(fmt.Sprintf("**请求状态码**: %d\n\n", info.HTTPCode))
+
+	if info.RequestID != "" {
+		content.WriteString(fmt.Sprintf("**请求ID**: %s\n\n", info.RequestID))
+	}
 
 	if info.Model != "" {
 		content.WriteString(fmt.Sprintf("**请求Model**: %s\n\n", info.Model))
@@ -455,6 +466,12 @@ func buildMarkdownMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 		// 转义 Markdown 特殊字符
 		escapedMsg := escapeMarkdown(info.ErrorMessage)
 		content.WriteString(fmt.Sprintf("**错误信息**: %s\n\n", escapedMsg))
+	}
+
+	if info.ResponseBody != "" {
+		// 转义 Markdown 特殊字符并使用代码块显示响应原报文
+		escapedBody := escapeMarkdown(info.ResponseBody)
+		content.WriteString(fmt.Sprintf("**响应原报文**:\n```\n%s\n```\n\n", escapedBody))
 	}
 
 	message := DingTalkMessage{
@@ -490,6 +507,10 @@ func buildTextMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 	content.WriteString(fmt.Sprintf("接口URI: %s\n", info.URI))
 	content.WriteString(fmt.Sprintf("请求状态码: %d\n", info.HTTPCode))
 
+	if info.RequestID != "" {
+		content.WriteString(fmt.Sprintf("请求ID: %s\n", info.RequestID))
+	}
+
 	if info.Model != "" {
 		content.WriteString(fmt.Sprintf("请求Model: %s\n", info.Model))
 	}
@@ -504,6 +525,10 @@ func buildTextMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 
 	if info.ErrorMessage != "" {
 		content.WriteString(fmt.Sprintf("错误信息: %s\n", info.ErrorMessage))
+	}
+
+	if info.ResponseBody != "" {
+		content.WriteString(fmt.Sprintf("响应原报文: %s\n", info.ResponseBody))
 	}
 
 	// 添加 @ 信息
@@ -536,7 +561,6 @@ func getModelFromRequest(ctx wrapper.HttpContext) string {
 	if requestModel, err := proxywasm.GetProperty([]string{"wasm.requestModel"}); err == nil {
 		model := string(requestModel)
 		if model != "" {
-			log.Debugf("got model from wasm.requestModel: %s", model)
 			return model
 		}
 	}
@@ -549,8 +573,6 @@ func getClusterName(ctx wrapper.HttpContext) string {
 	if raw, err := proxywasm.GetProperty([]string{"cluster_name"}); err == nil {
 		clusterName := string(raw)
 		if clusterName != "" {
-			log.Debugf("got cluster name: %s", clusterName)
-
 			// cluster_name 格式: outbound|443||llm-RightCodes.internal.dns
 			// 提取服务名称部分
 			parts := strings.Split(clusterName, "||")
@@ -564,8 +586,6 @@ func getClusterName(ctx wrapper.HttpContext) string {
 				if idx := strings.Index(serviceName, "."); idx > 0 {
 					serviceName = serviceName[:idx]
 				}
-
-				log.Debugf("extracted provider name: %s", serviceName)
 				return serviceName
 			}
 		}
@@ -576,6 +596,17 @@ func getClusterName(ctx wrapper.HttpContext) string {
 // isErrorCode 检查是否是错误状态码
 func isErrorCode(statusCode int) bool {
 	return statusCode >= 400 && statusCode < 600
+}
+
+// getRequestID 获取 Envoy 请求 ID
+func getRequestID() string {
+	// 从 x-request-id header 获取（Higress 的方式）
+	if requestIDHeader, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		if requestIDHeader != "" && requestIDHeader != "-" {
+			return requestIDHeader
+		}
+	}
+	return ""
 }
 
 // getAlertLevel 根据状态码获取告警级别
@@ -633,6 +664,12 @@ func extractErrorMessage(body []byte) string {
 		return ""
 	}
 
+	// 限制处理的 body 大小，避免处理过大的响应体
+	maxBodySize := 10 * 1024 // 10KB
+	if len(body) > maxBodySize {
+		body = body[:maxBodySize]
+	}
+
 	// 尝试解析 JSON
 	jsonData := gjson.ParseBytes(body)
 
@@ -642,8 +679,8 @@ func extractErrorMessage(body []byte) string {
 		if value := jsonData.Get(field); value.Exists() && value.String() != "" {
 			msg := value.String()
 			// 限制消息长度
-			if len(msg) > 100 {
-				return msg[:100] + "...(truncated)"
+			if len(msg) > 1000 {
+				return msg[:1000] + "...(truncated)"
 			}
 			return msg
 		}
@@ -651,8 +688,8 @@ func extractErrorMessage(body []byte) string {
 
 	// 如果无法解析，返回原始内容（限制长度）
 	bodyStr := string(body)
-	if len(bodyStr) > 100 {
-		return bodyStr[:100] + "...(truncated)"
+	if len(bodyStr) > 1000 {
+		return bodyStr[:1000] + "...(truncated)"
 	}
 	return bodyStr
 }

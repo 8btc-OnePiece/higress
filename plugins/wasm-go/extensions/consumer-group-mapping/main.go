@@ -180,7 +180,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 		return types.ActionContinue
 	}
 
-// 	log.Debugf("=== Consumer Group Mapping Plugin: extracted API key: %s ===", maskApiKey(apiKey))
 
 	// 3. 保存原始 API Key 到新的 header
 	if err := proxywasm.ReplaceHttpRequestHeader(OriginalApiKeyHeader, apiKey); err != nil {
@@ -221,7 +220,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 				if err := recover(); err != nil {
 					log.Errorf("=== Consumer Group Mapping Plugin: panic recovered in callback: %v ===", err)
 				}
-				log.Debugf("=== Consumer Group Mapping Plugin: resuming request ===")
 				proxywasm.ResumeHttpRequest()
 			}()
 
@@ -282,7 +280,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 			ctx.SetContext("group_api_key", groupKey)
 			ctx.SetContext("need_restore", true)
 
-// 			log.Debugf("=== Consumer Group Mapping Plugin: successfully replaced API key ===")
 		},
 		uint32(config.Timeout),
 	)

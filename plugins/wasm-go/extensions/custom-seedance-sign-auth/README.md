@@ -104,30 +104,30 @@ cd /Users/xiaodian/IdeaProjects/higress/plugins/wasm-go/extensions
 package main
 
 import (
-    "crypto/hmac"
-    "crypto/sha256"
-    "encoding/hex"
-    "encoding/json"
-    "fmt"
-    "time"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
 )
 
 func main() {
-    secretKey := "sk_xxx"
-    payload := map[string]interface{}{
-        "model":    "video_model_v1",
-        "prompt":   "生成一个简短视频",
-        "duration": 5.0,
-    }
-    bodyBytes, _ := json.Marshal(payload)
-    body := string(bodyBytes)
-    timestamp := fmt.Sprintf("%d", time.Now().Unix())
-    signText := timestamp + "\n" + body
+	secretKey := "sk_xxx"
+	payload := map[string]interface{}{
+		"model":    "video_model_v1",
+		"prompt":   "生成一个简短视频",
+		"duration": 5.0,
+	}
+	bodyBytes, _ := json.Marshal(payload)
+	body := string(bodyBytes)
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	signText := timestamp + "\n" + body
 
-    mac := hmac.New(sha256.New, []byte(secretKey))
-    mac.Write([]byte(signText))
-    signature := hex.EncodeToString(mac.Sum(nil))
-    fmt.Println(signature)
+	mac := hmac.New(sha256.New, []byte(secretKey))
+	mac.Write([]byte(signText))
+	signature := hex.EncodeToString(mac.Sum(nil))
+	fmt.Println(signature)
 }
 ```
 

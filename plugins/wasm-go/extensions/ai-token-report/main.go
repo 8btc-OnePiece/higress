@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 const (
 	// Report configuration
 	defaultReportTimeout int32 = 5000 // 5 seconds
+	maxAccumulatedSize   int    = 100 * 1024 // 100KB
 
 	// Context keys
 	CtxKeyModel      = "token_model"
@@ -31,6 +33,7 @@ const (
 	CtxRequestStart    = "request_start_time"
 	CtxFirstToken     = "first_token_time"
 	CtxTokenUsage      = "token_usage_raw"
+	CtxAccumulatedBody = "accumulated_body"
 	CtxSkipPlugin     = "skip_token_report"
 	providerTypeKey   = "providerType"
 
@@ -174,6 +177,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		return types.ActionContinue
 	}
 
+	// Clean up any residual data from previous requests to prevent memory leaks
+	ctx.SetContext(CtxAccumulatedBody, nil)
+	ctx.SetContext(CtxKeyInputToken, nil)
+	ctx.SetContext(CtxKeyOutputToken, nil)
+	ctx.SetContext(CtxKeyTotalToken, nil)
+	ctx.SetContext(CtxTokenUsage, nil)
+
 	// Set request start time
 	ctx.SetContext(CtxRequestStart, time.Now().UnixMilli())
 
@@ -232,6 +242,40 @@ func getRequestModel() string {
 	return ""
 }
 
+// setUsageToContext sets token usage values to context
+func setUsageToContext(ctx wrapper.HttpContext, usage tokenusage.TokenUsage) {
+	ctx.SetContext(CtxKeyInputToken, usage.InputToken)
+	ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
+	ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
+	if usageJSON, err := json.Marshal(usage); err == nil {
+		ctx.SetContext(CtxTokenUsage, string(usageJSON))
+	}
+}
+
+// shouldAccumulateChunk checks if a chunk should be accumulated for later usage parsing
+func shouldAccumulateChunk(data []byte) bool {
+	return bytes.Contains(data, []byte(`"usage"`)) ||
+		bytes.Contains(data, []byte(`"usageMetadata"`)) ||
+		bytes.Contains(data, []byte(`total_tokens`)) ||
+		bytes.Contains(data, []byte(`totalTokenCount`))
+}
+
+// accumulateChunk accumulates a chunk for later usage parsing, with size limit
+func accumulateChunk(ctx wrapper.HttpContext, data []byte) bool {
+	existingBody := ctx.GetByteSliceContext(CtxAccumulatedBody, []byte{})
+	if len(existingBody) >= maxAccumulatedSize {
+		log.Warnf("ai-token-report: accumulated body exceeded max size %d, skipping accumulation", maxAccumulatedSize)
+		ctx.SetContext(CtxAccumulatedBody, nil)
+		return false
+	}
+	accumulatedBody := make([]byte, len(existingBody)+len(data))
+	copy(accumulatedBody, existingBody)
+	copy(accumulatedBody[len(existingBody):], data)
+	ctx.SetContext(CtxAccumulatedBody, accumulatedBody)
+	log.Debugf("ai-token-report: accumulated body length=%d", len(accumulatedBody))
+	return true
+}
+
 func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, data []byte, endOfStream bool) []byte {
 	// 检查是否设置了跳过标记
 	if ctx.GetContext(CtxSkipPlugin) != nil {
@@ -248,36 +292,54 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 		ctx.SetContext(CtxFirstToken, time.Now().UnixMilli())
 	}
 
-	// Extract token usage from response body
+	// Extract token usage from response body (only if not disabled)
 	if !config.disableOpenaiUsage {
-		if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
-// 			ctx.SetContext(CtxKeyModel, usage.Model)
-			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
-			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
-			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
-			// 存储原始的 tokenUsage JSON 字符串
-			usageJSON, err := json.Marshal(usage)
-			if err == nil {
-				ctx.SetContext(CtxTokenUsage, string(usageJSON))
-			}
+		usage := tokenusage.GetTokenUsage(ctx, data)
+		if usage.TotalToken > 0 {
+			setUsageToContext(ctx, usage)
+			log.Debugf("ai-token-report: extracted usage via GetTokenUsage: total=%d", usage.TotalToken)
+			ctx.SetContext(CtxAccumulatedBody, nil) // Clean up
+		} else if len(data) > 0 && !endOfStream && shouldAccumulateChunk(data) {
+			accumulateChunk(ctx, data)
 		}
 	}
 
 	// Report token usage at the end of stream
 	if endOfStream {
-		// Calculate request duration for streaming response
+		// Calculate request duration
 		requestStartTime, ok := ctx.GetContext(CtxRequestStart).(int64)
 		if !ok {
-			log.Warn("ai-token-report: request start time not found in context (streaming), using current time")
+			log.Warn("ai-token-report: request start time not found in context (streaming)")
 			requestStartTime = time.Now().UnixMilli()
 		}
-
-		responseEndTime := time.Now().UnixMilli()
-		duration := responseEndTime - requestStartTime
+		duration := time.Now().UnixMilli() - requestStartTime
 		ctx.SetContext(LLMServiceDuration, duration)
+
+		// Try parsing from accumulated body if no TotalToken yet
+		if !config.disableOpenaiUsage {
+			totalTokenVal := ctx.GetContext(CtxKeyTotalToken)
+			totalToken, _ := convertToUInt(totalTokenVal)
+			if totalToken == 0 {
+				accumulatedBody := ctx.GetByteSliceContext(CtxAccumulatedBody, []byte{})
+				if len(accumulatedBody) > 0 {
+					log.Debugf("ai-token-report: trying to parse usage from accumulated body, length=%d", len(accumulatedBody))
+					usage := parseUsageDirectly(accumulatedBody)
+					if usage.TotalToken > 0 {
+						setUsageToContext(ctx, usage)
+						log.Infof("ai-token-report: successfully parsed usage from accumulated body: total=%d, input=%d, output=%d",
+							usage.TotalToken, usage.InputToken, usage.OutputToken)
+					} else {
+						log.Warnf("ai-token-report: failed to parse usage from accumulated body")
+					}
+				}
+			}
+		}
 
 		// Report token usage
 		reportTokenUsageFromContext(ctx, config, data)
+
+		// Clean up accumulated body
+		ctx.SetContext(CtxAccumulatedBody, nil)
 	}
 
 	return data
@@ -388,13 +450,18 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		return
 	}
 
-	// Get Envoy request ID from property
+	// Get Envoy request ID from x-request-id header
 	envoyRequestID := ""
-	if requestIDValue, err := proxywasm.GetProperty([]string{"request", "id"}); err == nil {
-		envoyRequestID = string(requestIDValue)
+	if requestIDHeader, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		envoyRequestID = requestIDHeader
 		if envoyRequestID != "" && envoyRequestID != "-" {
-			log.Debugf("Using Envoy request ID: %s", envoyRequestID)
+			log.Infof("Using Envoy request ID from x-request-id header: %s", envoyRequestID)
+		} else {
+			log.Debugf("x-request-id header is empty or '-', will generate one")
+			envoyRequestID = ""
 		}
+	} else {
+		log.Debugf("Failed to get x-request-id header: %v", err)
 	}
 
 	timestamp := time.Now().UnixMilli()
@@ -496,22 +563,16 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 	outputTokenVal := ctx.GetContext(CtxKeyOutputToken)
 	totalTokenVal := ctx.GetContext(CtxKeyTotalToken)
 
-	// Convert token values to uint64
-	inputTokens, ok := convertToUInt(inputTokenVal)
-	if !ok {
-		log.Warnf("InputToken conversion failed, skipping token usage report, model=%s, responseBody=%s", model, string(responseBody))
-		return
-	}
-
-	outputTokens, ok := convertToUInt(outputTokenVal)
-	if !ok {
-		return
-	}
+	// Convert token values to uint64, allowing input/output to be missing (default to 0)
+	// but totalTokens must exist
+	inputTokens, _ := convertToUInt(inputTokenVal)
+	outputTokens, _ := convertToUInt(outputTokenVal)
 
 	totalTokens, ok := convertToUInt(totalTokenVal)
-	if !ok {
-		return
-	}
+// 	if !ok {
+// 		log.Warnf("TotalToken conversion failed, skipping token usage report, model=%s", model)
+// 		return
+// 	}
 
 	// Get duration from context
 	durationVal := ctx.GetContext(LLMServiceDuration)
@@ -551,6 +612,7 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 	ctx.SetContext(CtxKeyTotalToken, nil)
 	ctx.SetContext(CtxFirstToken, nil)
 	ctx.SetContext(CtxTokenUsage, nil)
+	ctx.SetContext(CtxAccumulatedBody, nil) // Also clean up accumulated body
 	ctx.SetContext(LLMServiceDuration, nil)
 }
 
@@ -584,4 +646,120 @@ func camelToSnake(s string) string {
 		result = append(result, r)
 	}
 	return strings.ToLower(string(result))
+}
+
+// parseUsageDirectly directly parses usage from response body using gjson
+// This is a fallback when tokenusage.GetTokenUsage fails to extract usage
+func parseUsageDirectly(data []byte) tokenusage.TokenUsage {
+	usage := tokenusage.TokenUsage{}
+
+	// Add debug logging to see what we're working with
+	dataStr := string(data)
+
+	// Check if data starts with "data:" (SSE format)
+	if strings.HasPrefix(dataStr, "data:") {
+		log.Debugf("ai-token-report: data appears to be in SSE format")
+		// Remove "data:" prefix and parse the JSON
+		jsonStart := 5 // Skip "data:"
+		// Skip whitespace
+		for jsonStart < len(dataStr) && (dataStr[jsonStart] == ' ' || dataStr[jsonStart] == '\t') {
+			jsonStart++
+		}
+		trimmedData := dataStr[jsonStart:]
+		parsed := gjson.Parse(trimmedData)
+
+		// Try to get usage from the SSE JSON
+		if totalTokens := parsed.Get("usage.total_tokens"); totalTokens.Exists() {
+			usage.TotalToken = totalTokens.Int()
+			usage.InputToken = parsed.Get("usage.prompt_tokens").Int()
+			usage.OutputToken = parsed.Get("usage.completion_tokens").Int()
+			log.Infof("ai-token-report: found usage in SSE format: total=%d, input=%d, output=%d",
+				usage.TotalToken, usage.InputToken, usage.OutputToken)
+			return usage
+		}
+	}
+
+	// Try to parse usage from the data using gjson
+	parsed := gjson.ParseBytes(data)
+
+	// Try OpenAI format first
+	if totalTokens := parsed.Get("usage.total_tokens"); totalTokens.Exists() {
+		usage.TotalToken = totalTokens.Int()
+		usage.InputToken = parsed.Get("usage.prompt_tokens").Int()
+		usage.OutputToken = parsed.Get("usage.completion_tokens").Int()
+		log.Debugf("ai-token-report: parsed usage in OpenAI format: total=%d, input=%d, output=%d",
+			usage.TotalToken, usage.InputToken, usage.OutputToken)
+		return usage
+	}
+
+	// Try Gemini format
+	if totalTokens := parsed.Get("usageMetadata.totalTokenCount"); totalTokens.Exists() {
+		usage.TotalToken = totalTokens.Int()
+		usage.InputToken = parsed.Get("usageMetadata.promptTokenCount").Int()
+		usage.OutputToken = parsed.Get("usageMetadata.candidatesTokenCount").Int()
+		log.Debugf("ai-token-report: parsed usage in Gemini format: total=%d, input=%d, output=%d",
+			usage.TotalToken, usage.InputToken, usage.OutputToken)
+		return usage
+	}
+
+	// Log a sample of the data for debugging
+	sampleSize := 200
+	if len(dataStr) > sampleSize {
+		log.Debugf("ai-token-report: data sample (first %d chars): %s", sampleSize, dataStr[:sampleSize])
+	} else {
+		log.Debugf("ai-token-report: data sample: %s", dataStr)
+	}
+
+	// Try searching for usage in nested structures (for SSE format)
+	// Look for any object containing usage field
+	parsed.ForEach(func(key, value gjson.Result) bool {
+		if value.IsObject() {
+			// Check if this object has usage field
+			if usageObj := value.Get("usage"); usageObj.Exists() && usageObj.IsObject() {
+				if totalTokens := usageObj.Get("total_tokens"); totalTokens.Exists() {
+					usage.TotalToken = totalTokens.Int()
+					usage.InputToken = usageObj.Get("prompt_tokens").Int()
+					usage.OutputToken = usageObj.Get("completion_tokens").Int()
+					log.Infof("ai-token-report: found usage in nested structure: total=%d, input=%d, output=%d",
+						usage.TotalToken, usage.InputToken, usage.OutputToken)
+					return false // stop iteration
+				}
+			}
+		}
+		return true // continue iteration
+	})
+
+	if usage.TotalToken > 0 {
+		return usage
+	}
+
+	// If still not found, try to extract usage using regex-like search for usage patterns
+	// Look for usage patterns in the data: "usage":{"prompt_tokens":X,"completion_tokens":Y,"total_tokens":Z}
+	// This is a simplified search for common usage patterns
+	usageIdx := strings.Index(dataStr, `"usage":`)
+	if usageIdx != -1 {
+		// Find the opening brace after "usage:":
+		braceIdx := strings.Index(dataStr[usageIdx:], "{")
+		if braceIdx != -1 {
+			// Try to extract the usage object
+			usageStart := usageIdx + braceIdx
+			// Find matching closing brace (simplified - assumes no nested braces in usage)
+			usageEnd := strings.Index(dataStr[usageStart:], "}")
+			if usageEnd != -1 {
+				usageJSON := dataStr[usageStart : usageStart+usageEnd+1]
+				usageParsed := gjson.Parse(usageJSON)
+				if totalTokens := usageParsed.Get("total_tokens"); totalTokens.Exists() {
+					usage.TotalToken = totalTokens.Int()
+					usage.InputToken = usageParsed.Get("prompt_tokens").Int()
+					usage.OutputToken = usageParsed.Get("completion_tokens").Int()
+					log.Infof("ai-token-report: found usage via string search: total=%d, input=%d, output=%d",
+						usage.TotalToken, usage.InputToken, usage.OutputToken)
+					return usage
+				}
+			}
+		}
+	}
+
+	log.Debugf("ai-token-report: no usage found in data, length=%d", len(data))
+	return usage
 }

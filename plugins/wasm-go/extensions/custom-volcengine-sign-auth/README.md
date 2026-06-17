@@ -1,13 +1,15 @@
-# Volcengine Sign Auth Plugin
+# Custom Volcengine Sign Auth Plugin
 
 ## 功能说明
 
-volcengine-sign-auth 插件用于为转发的请求添加火山引擎签名 v4 认证头。该插件实现了火山引擎的签名算法 v4（类似 AWS Signature v4），自动为每个请求生成以下请求头：
+custom-volcengine-sign-auth 插件用于为转发的请求添加火山引擎签名 v4 认证头。该插件实现了火山引擎的签名算法 v4（类似 AWS Signature v4），自动为每个请求生成以下请求头：
 
 - `X-Date`: UTC 时间戳，格式为 YYYYMMDDTHHMMSSZ
 - `X-Content-Sha256`: 请求体的 SHA256 哈希值（十六进制）
 - `Authorization`: HMAC-SHA256 签名认证头
 - `Content-Type`: application/json; charset=utf-8（如果请求体不为空且未设置 Content-Type）
+
+**重要特性**：签名时使用的路径可通过配置参数 `sign_path` 自定义，默认为 `/ai-api/volcengine/openapi/`。
 
 ## 签名算法
 
@@ -15,7 +17,7 @@ volcengine-sign-auth 插件用于为转发的请求添加火山引擎签名 v4 �
 
 1. **构造规范请求（Canonical Request）**：
    - HTTP 方法（POST）
-   - 请求路径
+   - **签名路径**：可通过 `sign_path` 配置，默认为 `/ai-api/volcengine/openapi/`
    - 规范查询字符串（URL 编码并按 key 排序）
    - 规范请求头（content-type; host; x-content-sha256; x-date）
    - 签名字符串（请求体的 SHA256）
@@ -45,6 +47,7 @@ volcengine-sign-auth 插件用于为转发的请求添加火山引擎签名 v4 �
 | `secret_access_key` | string | 是 | - | 火山引擎 Secret Access Key |
 | `region` | string | 否 | ap-southeast-1 | 服务区域，支持 ap-southeast-1、cn-beijing 等 |
 | `service` | string | 否 | ark | 服务名，默认为 ark |
+| `sign_path` | string | 否 | /ai-api/volcengine/openapi/ | 签名时使用的路径 |
 | `enabled` | bool | 否 | true | 是否启用签名功能 |
 | `override_existing` | bool | 否 | true | 如果请求中已存在签名头，是否覆盖 |
 
@@ -56,6 +59,7 @@ volcengine-sign-auth 插件用于为转发的请求添加火山引擎签名 v4 �
   "secret_access_key": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   "region": "ap-southeast-1",
   "service": "ark",
+  "sign_path": "/ai-api/volcengine/openapi/",
   "enabled": true,
   "override_existing": true
 }
@@ -68,6 +72,7 @@ access_key_id: "AKLTXXXXXXXXXXXXXXXX"
 secret_access_key: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 region: "ap-southeast-1"
 service: "ark"
+sign_path: "/ai-api/volcengine/openapi/"
 enabled: true
 override_existing: true
 ```
@@ -79,6 +84,10 @@ override_existing: true
 1. 转发到火山引擎 ARK 服务（openai.pixmax.ai）
 2. 转发到需要火山引擎认证的其他服务
 3. 与火山引擎的 AI 服务、媒体处理服务等集成
+
+**特别说明**：
+- 该插件支持自定义签名路径，可适应不同的 API 端点需求
+- 签名算法完全参考官方 Go 实现，确保与火山引擎 API 兼容
 
 ## 构建和部署
 
@@ -95,17 +104,17 @@ BUILD_MODE=tinygo ./build.sh
 ### 构建 Docker 镜像
 
 ```bash
-docker build -t volcengine-sign-auth:1.0.0 .
+docker build -t custom-volcengine-sign-auth:1.0.0 .
 ```
 
 ### 推送到镜像仓库
 
 ```bash
 # 标记镜像
-docker tag volcengine-sign-auth:1.0.0 swr.cn-east-3.myhuaweicloud.com/your-namespace/volcengine-sign-auth:1.0.0
+docker tag custom-volcengine-sign-auth:1.0.0 swr.cn-east-3.myhuaweicloud.com/your-namespace/custom-volcengine-sign-auth:1.0.0
 
 # 推送镜像
-docker push swr.cn-east-3.myhuaweicloud.com/your-namespace/volcengine-sign-auth:1.0.0
+docker push swr.cn-east-3.myhuaweicloud.com/your-namespace/custom-volcengine-sign-auth:1.0.0
 ```
 
 ### 使用构建脚本（推荐）
@@ -114,7 +123,7 @@ docker push swr.cn-east-3.myhuaweicloud.com/your-namespace/volcengine-sign-auth:
 
 ```bash
 cd /Users/xiaodian/IdeaProjects/higress/plugins/wasm-go/extensions
-./build-and-push-plugin.sh volcengine-sign-auth
+./build-and-push-plugin.sh custom-volcengine-sign-auth
 ```
 
 ## 测试签名算法
@@ -132,12 +141,15 @@ import (
 	"time"
 )
 
-func main() {
-	secretAccessKey := "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-	accessKeyID := "AKLTXXXXXXXXXXXXXXXX"
-	region := "ap-southeast-1"
-	service := "ark"
+const (
+	SIGN_PATH         = "/ai-api/volcengine/openapi/"
+	SECRET_ACCESS_KEY = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+	ACCESS_KEY_ID     = "AKLTXXXXXXXXXXXXXXXX"
+	REGION            = "ap-southeast-1"
+	SERVICE           = "ark"
+)
 
+func main() {
 	xDate := time.Now().UTC().Format("20060102T150405Z")
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}`
 
@@ -146,31 +158,32 @@ func main() {
 	xContentSha256 := hex.EncodeToString(hash[:])
 
 	// 派生签名密钥
-	kDate := hmacSha256([]byte(secretAccessKey), xDate[:8])
-	kRegion := hmacSha256(kDate, region)
-	kService := hmacSha256(kRegion, service)
+	kDate := hmacSha256([]byte(SECRET_ACCESS_KEY), xDate[:8])
+	kRegion := hmacSha256(kDate, REGION)
+	kService := hmacSha256(kRegion, SERVICE)
 	kSigning := hmacSha256(kService, "request")
 
-	// 构造规范请求
+	// 构造规范请求（使用自定义路径 SIGN_PATH）
 	canonicalRequest := fmt.Sprintf(
-		"POST\n/ai-api/volcengine/openapi/\nAction=CreateChatCompletion&Version=2024-01-01\n"+
+		"POST\n%s\nAction=CreateChatCompletion&Version=2024-01-01\n"+
 		"content-type:application/json; charset=utf-8\n"+
 		"host:openai.pixmax.ai\n"+
 		"x-content-sha256:%s\n"+
 		"x-date:%s\n\n"+
 		"content-type;host;x-content-sha256;x-date\n%s",
-		xContentSha256, xDate, xContentSha256,
+		SIGN_PATH, xContentSha256, xDate, xContentSha256,
 	)
 
 	// 计算签名
 	hashedCanonicalRequest := sha256.Sum256([]byte(canonicalRequest))
-	credentialScope := fmt.Sprintf("%s/%s/%s/request", xDate[:8], region, service)
+	credentialScope := fmt.Sprintf("%s/%s/%s/request", xDate[:8], REGION, SERVICE)
 	stringToSign := fmt.Sprintf("HMAC-SHA256\n%s\n%s\n%s", xDate, credentialScope, hex.EncodeToString(hashedCanonicalRequest[:]))
 	signature := hmacSha256Hex(kSigning, stringToSign)
 
-	authorization := fmt.Sprintf("HMAC-SHA256 Credential=%s/%s, SignedHeaders=content-type;host;x-content-sha256;x-date, Signature=%s", accessKeyID, credentialScope, signature)
+	authorization := fmt.Sprintf("HMAC-SHA256 Credential=%s/%s, SignedHeaders=content-type;host;x-content-sha256;x-date, Signature=%s", ACCESS_KEY_ID, credentialScope, signature)
 
 	fmt.Println("Authorization:", authorization)
+	fmt.Println("Sign Path:", SIGN_PATH)
 }
 
 func hmacSha256(key []byte, content string) []byte {
@@ -191,5 +204,6 @@ func hmacSha256Hex(key []byte, content string) string {
 1. 签名头会在请求体读取后添加，确保插件在请求体处理阶段执行
 2. X-Date 使用 UTC 时间，格式为 YYYYMMDDTHHMMSSZ
 3. 签名计算包含完整的请求体内容，确保请求体在签名过程中不变
-4. 建议在 Higress Console 中启用详细日志以便调试
-5. 该插件完全兼容火山引擎的签名 v4 规范，可用于调用火山引擎的各种 API 服务
+4. **重要**：签名路径通过 `sign_path` 参数配置，默认为 `/ai-api/volcengine/openapi/`
+5. 建议在 Higress Console 中启用详细日志以便调试
+6. 该插件完全兼容火山引擎的签名 v4 规范，可用于调用火山引擎的各种 API 服务

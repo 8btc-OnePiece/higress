@@ -19,7 +19,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -49,6 +48,9 @@ const (
 	HMAC_SHA256     = "HMAC-SHA256"
 	CONTENT_TYPE    = "application/json; charset=utf-8"
 
+	// 默认签名路径
+	DEFAULT_SIGN_PATH = "/ai-api/volcengine/openapi/"
+
 	// 请求头名称
 	HeaderHost            = "Host"
 	HeaderContentType     = "Content-Type"
@@ -67,6 +69,10 @@ type VolcengineSignAuthConfig struct {
 	// @Description 火山引擎 Secret Access Key
 	SecretAccessKey string `yaml:"secret_access_key" json:"secret_access_key"`
 
+	// @Title Host
+	// @Description 签名时使用的 Host（重要：这是用于签名的固定值，如 openai.pixmax.ai）
+	Host string `yaml:"host" json:"host"`
+
 	// @Title 区域
 	// @Description 服务区域，默认为 ap-southeast-1
 	Region string `yaml:"region" json:"region"`
@@ -74,6 +80,10 @@ type VolcengineSignAuthConfig struct {
 	// @Title 服务名
 	// @Description 服务名，默认为 ark
 	Service string `yaml:"service" json:"service"`
+
+	// @Title 签名路径
+	// @Description 签名时使用的路径，默认为 /ai-api/volcengine/openapi/
+	SignPath string `yaml:"sign_path" json:"sign_path"`
 
 	// @Title 是否启用签名
 	// @Description 是否启用签名功能，默认为 true
@@ -97,6 +107,12 @@ func parseConfig(json gjson.Result, config *VolcengineSignAuthConfig) error {
 		return fmt.Errorf("secret_access_key is required")
 	}
 
+	// 解析 host（重要：必须配置，这是签名时使用的固定值）
+	config.Host = json.Get("host").String()
+	if config.Host == "" {
+		return fmt.Errorf("host is required (e.g., openai.pixmax.ai)")
+	}
+
 	// 解析 region，默认为 ap-southeast-1
 	config.Region = json.Get("region").String()
 	if config.Region == "" {
@@ -107,6 +123,12 @@ func parseConfig(json gjson.Result, config *VolcengineSignAuthConfig) error {
 	config.Service = json.Get("service").String()
 	if config.Service == "" {
 		config.Service = "ark"
+	}
+
+	// 解析 sign_path，默认为 /ai-api/volcengine/openapi/
+	config.SignPath = json.Get("sign_path").String()
+	if config.SignPath == "" {
+		config.SignPath = DEFAULT_SIGN_PATH
 	}
 
 	// 解析 enabled，默认为 true
@@ -121,8 +143,8 @@ func parseConfig(json gjson.Result, config *VolcengineSignAuthConfig) error {
 		config.OverrideExisting = true
 	}
 
-	log.Infof("volcengine-sign-auth plugin loaded: enabled=%v, access_key_id=%s, region=%s, service=%s",
-		config.Enabled, config.AccessKeyID, config.Region, config.Service)
+	log.Infof("volcengine-sign-auth plugin loaded: enabled=%v, access_key_id=%s, host=%s, region=%s, service=%s, sign_path=%s",
+		config.Enabled, config.AccessKeyID, config.Host, config.Region, config.Service, config.SignPath)
 
 	return nil
 }
@@ -146,8 +168,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config VolcengineSignAuthConf
 	// 生成 X-Date 并保存到上下文
 	xDate := utcNow()
 	ctx.SetContext("x_date", xDate)
-
-	log.Debugf("volcengine-sign-auth: x_date=%s, pausing to read request body", xDate)
 
 	// 返回 ActionPause 暂停请求处理
 	// 这样 onHttpRequestBody 会被调用，我们可以在那里添加请求头
@@ -185,45 +205,36 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config VolcengineSignAuthConfig,
 	}
 
 	// 分离路径和查询参数
-	pathOnly := path
 	query := ""
 	if idx := strings.Index(path, "?"); idx != -1 {
-		pathOnly = path[:idx]
 		query = path[idx+1:]
 	}
 
-	// 获取 Host
-	host, err := proxywasm.GetHttpRequestHeader(HeaderHost)
-	if err != nil || host == "" {
-		// 从 :path 中提取 host（如果 Host 头不存在）
-		if idx := strings.Index(pathOnly, "//"); idx != -1 {
-			hostStart := idx + 2
-			if hostEnd := strings.Index(pathOnly[hostStart:], "/"); hostEnd != -1 {
-				host = pathOnly[hostStart : hostStart+hostEnd]
-			}
-		}
-		if host == "" {
-			log.Errorf("volcengine-sign-auth: failed to determine host")
-			proxywasm.ResumeHttpRequest()
-			return types.ActionContinue
-		}
-	}
-
 	// 计算请求体的 SHA256
-	bodyStr := string(body)
-	xContentSha256 := sha256Hex([]byte(bodyStr))
+	// 直接使用原始请求体，不做任何处理
+	// 参考官方示例：body 字符串直接传入 sha256Hex()
+	xContentSha256 := sha256Hex(body)
+
 
 	// 生成 Authorization 头
-	authorization := config.generateAuthorization("POST", pathOnly, query, xDate, xContentSha256, host)
+	// 重要：使用配置中的 Host，而不是从请求中获取的 Host
+	// 参考官方实现：cfg.host 是配置中的固定值
+	authorization := config.generateAuthorization("POST", config.SignPath, query, xDate, xContentSha256, config.Host)
 
-	log.Debugf("volcengine-sign-auth: generated authorization=%s", maskAuth(authorization))
+	log.Debugf("volcengine-sign-auth: generated authorization=%s", authorization)
 
 	// 移除已存在的签名头（如果有）
 	proxywasm.RemoveHttpRequestHeader(HeaderXDate)
 	proxywasm.RemoveHttpRequestHeader(HeaderXContentSha256)
 	proxywasm.RemoveHttpRequestHeader(HeaderAuthorization)
 
-	// 添加签名请求头
+// 	// 添加签名请求头
+// 	// 打印所有签名头值用于调试
+// 	log.Infof("volcengine-sign-auth: [DEBUG] X-Date=%s", xDate)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] X-Content-Sha256=%s", xContentSha256)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] Authorization=%s", authorization)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] Content-Type=%s", CONTENT_TYPE)
+
 	if err := proxywasm.AddHttpRequestHeader(HeaderXDate, xDate); err != nil {
 		log.Errorf("volcengine-sign-auth: failed to add %s header: %v", HeaderXDate, err)
 	}
@@ -234,18 +245,15 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config VolcengineSignAuthConfig,
 		log.Errorf("volcengine-sign-auth: failed to add %s header: %v", HeaderAuthorization, err)
 	}
 
-	// 设置 Content-Type（如果请求体不为空）
-	if len(bodyStr) > 0 {
-		existingContentType, _ := proxywasm.GetHttpRequestHeader(HeaderContentType)
-		if existingContentType == "" {
-			proxywasm.RemoveHttpRequestHeader(HeaderContentType)
-			if err := proxywasm.AddHttpRequestHeader(HeaderContentType, CONTENT_TYPE); err != nil {
-				log.Errorf("volcengine-sign-auth: failed to set %s header: %v", HeaderContentType, err)
-			}
-		}
+	// 设置 Content-Type
+	// 重要：必须使用固定的 CONTENT_TYPE 进行签名，所以需要覆盖已存在的 Content-Type
+	// 始终设置 Content-Type，因为签名中包含了 content-type 头
+	proxywasm.RemoveHttpRequestHeader(HeaderContentType)
+	if err := proxywasm.AddHttpRequestHeader(HeaderContentType, CONTENT_TYPE); err != nil {
+		log.Errorf("volcengine-sign-auth: failed to set %s header: %v", HeaderContentType, err)
 	}
 
-	log.Infof("volcengine-sign-auth: signature headers added, resuming request")
+// 	log.Infof("volcengine-sign-auth: signature headers added, resuming request")
 
 	// 恢复请求处理
 	proxywasm.ResumeHttpRequest()
@@ -254,6 +262,17 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config VolcengineSignAuthConfig,
 
 // generateAuthorization 生成火山引擎签名 v4 的 Authorization 头
 func (config *VolcengineSignAuthConfig) generateAuthorization(method, path, query, xDate, xContentSha256, host string) string {
+	// 打印输入参数
+// 	log.Infof("volcengine-sign-auth: [DEBUG] generateAuthorization inputs:")
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   method=%s", method)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   path=%s", path)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   query=%s", query)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   xDate=%s", xDate)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   xContentSha256=%s", xContentSha256)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   host=%s", host)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   config.Region=%s", config.Region)
+// 	log.Infof("volcengine-sign-auth: [DEBUG]   config.Service=%s", config.Service)
+
 	signedHeaders := "content-type;host;x-content-sha256;x-date"
 
 	// 构造规范请求
@@ -270,12 +289,17 @@ func (config *VolcengineSignAuthConfig) generateAuthorization(method, path, quer
 		xContentSha256,
 	)
 
+	// 打印规范请求用于调试
+// 	log.Infof("volcengine-sign-auth: [DEBUG] CanonicalRequest:\n%s", canonicalRequest)
+
 	// 对规范请求进行哈希
 	hashedCanonicalRequest := sha256Hex([]byte(canonicalRequest))
+// 	log.Infof("volcengine-sign-auth: [DEBUG] HashedCanonicalRequest=%s", hashedCanonicalRequest)
 
 	// 构造签名范围
 	shortXDate := xDate[:8]
 	credentialScope := fmt.Sprintf("%s/%s/%s/request", shortXDate, config.Region, config.Service)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] CredentialScope=%s", credentialScope)
 
 	// 构造待签名字符串
 	stringToSign := fmt.Sprintf(
@@ -285,6 +309,7 @@ func (config *VolcengineSignAuthConfig) generateAuthorization(method, path, quer
 		credentialScope,
 		hashedCanonicalRequest,
 	)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] StringToSign:\n%s", stringToSign)
 
 	// 生成签名密钥
 	signingKey := genSigningSecretKeyV4(
@@ -296,6 +321,7 @@ func (config *VolcengineSignAuthConfig) generateAuthorization(method, path, quer
 
 	// 计算签名
 	signature := hmacSha256Hex(signingKey, stringToSign)
+// 	log.Infof("volcengine-sign-auth: [DEBUG] Signature=%s", signature)
 
 	// 构造 Authorization 头
 	return fmt.Sprintf(
@@ -343,67 +369,58 @@ func genSigningSecretKeyV4(secretKey []byte, date, region, service string) []byt
 }
 
 // canonicalQuery 构造规范查询字符串
+// 参考官方实现：先解析，排序，然后进行 URL 编码
 func canonicalQuery(query string) string {
 	if query == "" {
 		return ""
 	}
 
-	// 解析查询参数
 	queryMap := make(map[string]string)
 	for _, part := range strings.Split(query, "&") {
-		if part == "" {
-			continue
+		keyValue := strings.SplitN(part, "=", 2)
+		key := keyValue[0]
+		value := ""
+		if len(keyValue) == 2 {
+			value = keyValue[1]
 		}
-		idx := strings.Index(part, "=")
-		var key, value string
-		if idx != -1 {
-			key = part[:idx]
-			value = part[idx+1:]
-		} else {
-			key = part
-			value = ""
-		}
-		// URL 解码 key 和 value
-		decodedKey, _ := url.QueryUnescape(key)
-		decodedValue, _ := url.QueryUnescape(value)
-		queryMap[decodedKey] = decodedValue
+		queryMap[key] = value
 	}
 
-	// 按 key 排序
-	var keys []string
-	for k := range queryMap {
-		keys = append(keys, k)
+	keys := make([]string, 0, len(queryMap))
+	for key := range queryMap {
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 
-	// 构造规范查询字符串
-	var pairs []string
+	pairs := make([]string, 0, len(keys))
 	for _, key := range keys {
-		pairs = append(pairs, fmt.Sprintf("%s=%s", signStringEncode(key), signStringEncode(queryMap[key])))
+		pairs = append(pairs, signStringEncode(key)+"="+signStringEncode(queryMap[key]))
 	}
-
 	return strings.Join(pairs, "&")
 }
 
 // signStringEncode 对字符串进行 URL 编码（遵循签名规范）
+// 参考官方实现
 func signStringEncode(source string) string {
 	if source == "" {
 		return ""
 	}
 
-	var encoded []byte
-	for _, r := range source {
-		c := byte(r)
-		if isUrlEncodedByte(c) {
-			encoded = append(encoded, c)
-		} else if c == ' ' {
-			encoded = append(encoded, '%', '2', '0')
-		} else {
-			encoded = append(encoded, fmt.Sprintf("%%%02X", c)...)
+	var buffer strings.Builder
+	for _, b := range []byte(source) {
+		if isUrlEncodedByte(b) {
+			buffer.WriteByte(b)
+			continue
 		}
+		if b == ' ' {
+			buffer.WriteString("%20")
+			continue
+		}
+		buffer.WriteByte('%')
+		buffer.WriteByte("0123456789ABCDEF"[b>>4])
+		buffer.WriteByte("0123456789ABCDEF"[b&0x0F])
 	}
-
-	return string(encoded)
+	return buffer.String()
 }
 
 // isUrlEncodedByte 判断字节是否需要编码
