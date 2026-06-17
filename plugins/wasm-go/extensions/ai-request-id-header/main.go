@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	responseRequestIDHeader = "request_id"
-	upstreamRequestIDHeader = "x-request-id"
+	responseRequestIDHeader = "request-id"
+	upstreamRequestIDHeader = "request-id"
 )
 
 type RequestIDHeaderConfig struct{}
@@ -59,8 +59,12 @@ func getRequestID() string {
 		}
 	}
 
-	if value, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
-		return normalizeRequestID(value)
+	for _, header := range []string{upstreamRequestIDHeader, "x-request-id"} {
+		if value, err := proxywasm.GetHttpRequestHeader(header); err == nil {
+			if requestID := normalizeRequestID(value); requestID != "" {
+				return requestID
+			}
+		}
 	}
 
 	return ""

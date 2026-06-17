@@ -4,8 +4,8 @@
 
 AI Request ID Header 插件用于在网关侧传播同一个 request ID：
 
-- request headers 阶段写入 upstream `x-request-id`，便于 open-platform 等上游服务读取；
-- response headers 阶段写入客户端响应头 `request_id`，便于客户端本地 session 记录；
+- request headers 阶段写入 upstream `request-id`，便于 open-platform 等上游服务读取；
+- response headers 阶段写入客户端响应头 `request-id`，便于客户端本地 session 记录；
 - 与 `ai-token-report` 使用同一 request ID 来源，保证 token usage 上报与 header 链路一致。
 
 ## 核心行为
@@ -14,19 +14,20 @@ AI Request ID Header 插件用于在网关侧传播同一个 request ID：
 
 ```go
 proxywasm.GetProperty([]string{"x_request_id"})
+proxywasm.GetHttpRequestHeader("request-id")
 proxywasm.GetHttpRequestHeader("x-request-id")
 ```
 
 - 当 request ID 非空且不为 `-` 时，在 request headers 阶段写入 upstream header：
 
 ```text
-x-request-id: <request id>
+request-id: <request id>
 ```
 
 - 同时在 response headers 阶段写入客户端响应头：
 
 ```text
-request_id: <request id>
+request-id: <request id>
 ```
 
 - 当 request ID 为空、`-` 或读取失败时，不写 header，不影响主请求链路。
