@@ -9,7 +9,10 @@ import (
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 )
 
-const requestIDHeader = "request-id"
+const (
+	responseRequestIDHeader = "request_id"
+	upstreamRequestIDHeader = "x-request-id"
+)
 
 type RequestIDResponseHeaderConfig struct{}
 
@@ -18,8 +21,22 @@ func main() {}
 func init() {
 	wrapper.SetCtx(
 		"ai-request-id-response-header",
+		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 	)
+}
+
+func onHttpRequestHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfig) types.Action {
+	requestID := getRequestID()
+	if requestID == "" {
+		return types.ActionContinue
+	}
+
+	if err := proxywasm.ReplaceHttpRequestHeader(upstreamRequestIDHeader, requestID); err != nil {
+		log.Warnf("ai-request-id-response-header: failed to set upstream request header: %v", err)
+	}
+
+	return types.ActionContinue
 }
 
 func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfig) types.Action {
@@ -28,7 +45,7 @@ func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfi
 		return types.ActionContinue
 	}
 
-	if err := proxywasm.ReplaceHttpResponseHeader(requestIDHeader, requestID); err != nil {
+	if err := proxywasm.ReplaceHttpResponseHeader(responseRequestIDHeader, requestID); err != nil {
 		log.Warnf("ai-request-id-response-header: failed to set response header: %v", err)
 	}
 
