@@ -26,13 +26,13 @@ const (
 	maxAccumulatedSize   int    = 100 * 1024 // 100KB
 
 	// Context keys
-	CtxKeyModel      = "token_model"
-	CtxKeyInputToken = "token_input"
+	CtxKeyModel       = "token_model"
+	CtxKeyInputToken  = "token_input"
 	CtxKeyOutputToken = "token_output"
 	CtxKeyTotalToken  = "token_total"
-	CtxRequestStart    = "request_start_time"
+	CtxRequestStart   = "request_start_time"
 	CtxFirstToken     = "first_token_time"
-	CtxTokenUsage      = "token_usage_raw"
+	CtxTokenUsage     = "token_usage_raw"
 	CtxAccumulatedBody = "accumulated_body"
 	CtxSkipPlugin     = "skip_token_report"
 	providerTypeKey   = "providerType"
@@ -64,10 +64,10 @@ type TokenUsageReportRequest struct {
 
 // TokenUsageReportConfig holds the configuration for token usage reporting
 type TokenUsageReportConfig struct {
-	reportClient      wrapper.HttpClient
-	reportApiUrl      string
-	reportServiceName string
-	reportTimeout     int32
+	reportClient       wrapper.HttpClient
+	reportApiUrl       string
+	reportServiceName  string
+	reportTimeout      int32
 	disableOpenaiUsage bool
 }
 
@@ -217,7 +217,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, b
 		}
 	}
 
-    // 如果 model 为空，则跳过读取响应体
+	// 如果 model 为空，则跳过读取响应体
 	if model == "" {
 		log.Debugf("ai-token-report: request model is empty, skipping response body read")
 		ctx.DontReadResponseBody()
@@ -274,6 +274,28 @@ func accumulateChunk(ctx wrapper.HttpContext, data []byte) bool {
 	ctx.SetContext(CtxAccumulatedBody, accumulatedBody)
 	log.Debugf("ai-token-report: accumulated body length=%d", len(accumulatedBody))
 	return true
+}
+
+func getRequestID() string {
+	if value, err := proxywasm.GetProperty([]string{"x_request_id"}); err == nil {
+		if requestID := normalizeRequestID(string(value)); requestID != "" {
+			return requestID
+		}
+	}
+
+	if value, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		return normalizeRequestID(value)
+	}
+
+	return ""
+}
+
+func normalizeRequestID(value string) string {
+	requestID := strings.TrimSpace(value)
+	if requestID == "" || requestID == "-" {
+		return ""
+	}
+	return requestID
 }
 
 func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, data []byte, endOfStream bool) []byte {
@@ -370,7 +392,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-// 			ctx.SetContext(CtxKeyModel, usage.Model)
+			// 			ctx.SetContext(CtxKeyModel, usage.Model)
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
@@ -429,7 +451,7 @@ func convertToUInt(val interface{}) (uint64, bool) {
 }
 
 func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, model string, inputTokens, outputTokens,
-                      totalTokens uint64, duration int64, startTime, endTime int64, tokenUsage string) {
+	totalTokens uint64, duration int64, startTime, endTime int64, tokenUsage string) {
 	// Add panic recovery to ensure reporting never crashes the main flow
 	defer func() {
 		if r := recover(); r != nil {
@@ -466,9 +488,10 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 
 	timestamp := time.Now().UnixMilli()
 	var requestID string
-	if envoyRequestID != "" {
-		requestID = envoyRequestID
-		log.Debugf("reportTokenUsage using Envoy request ID: %s", envoyRequestID)
+	upstreamRequestID := getRequestID()
+	if upstreamRequestID != "" {
+		requestID = upstreamRequestID
+		log.Debugf("reportTokenUsage using upstream request ID: %s", upstreamRequestID)
 	} else {
 		randomSuffix := generateRandomString(8)
 		requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)
