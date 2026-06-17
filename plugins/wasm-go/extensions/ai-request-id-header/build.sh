@@ -2,11 +2,11 @@
 
 set -e
 
-PLUGIN_NAME="ai-request-id-response-header"
+PLUGIN_NAME="ai-request-id-header"
 VERSION=$(cat VERSION 2>/dev/null || echo "1.0.0")
 
 echo "========================================"
-echo "Building AI Request ID Response Header Plugin"
+echo "Building AI Request ID Header Plugin"
 echo "========================================"
 echo "Plugin: $PLUGIN_NAME"
 echo "Version: $VERSION"

@@ -1,4 +1,4 @@
-module github.com/higress-group/wasm-go/extensions/ai-request-id-response-header
+module github.com/higress-group/wasm-go/extensions/ai-request-id-header
 
 go 1.24.1
 

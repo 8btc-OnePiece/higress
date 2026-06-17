@@ -14,39 +14,39 @@ const (
 	upstreamRequestIDHeader = "x-request-id"
 )
 
-type RequestIDResponseHeaderConfig struct{}
+type RequestIDHeaderConfig struct{}
 
 func main() {}
 
 func init() {
 	wrapper.SetCtx(
-		"ai-request-id-response-header",
+		"ai-request-id-header",
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 	)
 }
 
-func onHttpRequestHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfig) types.Action {
+func onHttpRequestHeaders(_ wrapper.HttpContext, _ RequestIDHeaderConfig) types.Action {
 	requestID := getRequestID()
 	if requestID == "" {
 		return types.ActionContinue
 	}
 
 	if err := proxywasm.ReplaceHttpRequestHeader(upstreamRequestIDHeader, requestID); err != nil {
-		log.Warnf("ai-request-id-response-header: failed to set upstream request header: %v", err)
+		log.Warnf("ai-request-id-header: failed to set upstream request header: %v", err)
 	}
 
 	return types.ActionContinue
 }
 
-func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDResponseHeaderConfig) types.Action {
+func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDHeaderConfig) types.Action {
 	requestID := getRequestID()
 	if requestID == "" {
 		return types.ActionContinue
 	}
 
 	if err := proxywasm.ReplaceHttpResponseHeader(responseRequestIDHeader, requestID); err != nil {
-		log.Warnf("ai-request-id-response-header: failed to set response header: %v", err)
+		log.Warnf("ai-request-id-header: failed to set response header: %v", err)
 	}
 
 	return types.ActionContinue
