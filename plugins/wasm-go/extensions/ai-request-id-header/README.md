@@ -18,13 +18,13 @@ proxywasm.GetHttpRequestHeader("request-id")
 proxywasm.GetHttpRequestHeader("x-request-id")
 ```
 
-- 当 request ID 非空且不为 `-` 时，在 request headers 阶段写入 upstream header：
+- 当 request ID 非空且不为 `-`，且请求不是转发给 AI 提供商时，在 request headers 阶段写入 upstream header：
 
 ```text
 request-id: <request id>
 ```
 
-- 同时在 response headers 阶段写入客户端响应头：
+- 同时在 response headers 阶段写入客户端响应头（无论是否转发给 AI 提供商，响应头都返回给客户端）：
 
 ```text
 request-id: <request id>
@@ -32,13 +32,29 @@ request-id: <request id>
 
 - 当 request ID 为空、`-` 或读取失败时，不写 header，不影响主请求链路。
 
+## AI 提供商路由识别
+
+为避免向 AI 提供商（如 rightcode）注入 `request-id` 导致上游返回 404，插件在 request headers 阶段先判断当前请求是否转发给 AI 提供商，是则跳过 upstream header 注入。判定顺序：
+
+1. **主信号**：读取 `wasm.providerType` 属性。该属性由 `ai-proxy` 在请求阶段写入（见 `ai-proxy/main.go` 的 `onHttpRequestHeader`），与 `ai-token-report` 读取该属性的方式一致。属性非空即视为 AI 路由。
+   - 前提：本插件的执行优先级必须低于 `ai-proxy`，否则属性尚未写入会导致漏判。
+2. **兜底信号**：读取 `cluster_name` 属性，命中配置的 `skipClusterNamePatterns` 中任一子串即视为 AI 路由。覆盖绕开 `ai-proxy` 直连 AI 厂商的路由（如 `right-codes.dns`）。
+
+response headers 阶段不进行该判断——响应头只返回给客户端，不会到达 AI 提供商。
+
 ## 配置说明
 
-插件无需配置。
-
 ```json
-{}
+{
+  "skipClusterNamePatterns": ["llm-", "right-codes.dns", "right-codes-v2.dns"]
+}
 ```
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `skipClusterNamePatterns` | `[]string` | `["llm-"]` | cluster_name 子串匹配列表，命中任一则跳过 upstream `request-id` 注入。传空数组 `[]` 可关闭 cluster_name 兜底（仅依赖 `wasm.providerType`）。 |
+
+默认 `["llm-"]` 对应集群命名约定（`llm-RightCodes.internal.dns` 等 AI 提供商 cluster 均带此前缀）。若存在不带 `llm-` 前缀的直连 AI 路由（如 `right-codes.dns`），需在配置中追加对应 cluster 名。
 
 ## 构建
 
