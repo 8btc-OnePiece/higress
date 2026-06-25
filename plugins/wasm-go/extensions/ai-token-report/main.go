@@ -392,17 +392,45 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 	// Extract token usage from response body
 	if !config.disableOpenaiUsage {
 		if usage := tokenusage.GetTokenUsage(ctx, body); usage.TotalToken > 0 {
-			// 			ctx.SetContext(CtxKeyModel, usage.Model)
+			// Update model from response body if not already set (or override with response value)
+			if usage.Model != "" && usage.Model != tokenusage.ModelUnknown {
+				ctx.SetContext(CtxKeyModel, usage.Model)
+			}
+
+			// Supplement model from response body via direct gjson if GetTokenUsage missed it
+			if usage.Model == "" || usage.Model == tokenusage.ModelUnknown {
+				if model := gjson.GetBytes(body, "model"); model.Exists() && model.String() != "" {
+					usage.Model = model.String()
+					ctx.SetContext(CtxKeyModel, usage.Model)
+				}
+			}
+
+			// Supplement token details from response body via direct gjson if GetTokenUsage missed them
+			if len(usage.InputTokenDetails) == 0 {
+				if inputDetails := gjson.GetBytes(body, "usage.prompt_tokens_details"); inputDetails.Exists() && inputDetails.IsObject() {
+					for key, value := range inputDetails.Map() {
+						usage.InputTokenDetails[key] = value.Int()
+					}
+				}
+			}
+			if len(usage.OutputTokenDetails) == 0 {
+				if outputDetails := gjson.GetBytes(body, "usage.completion_tokens_details"); outputDetails.Exists() && outputDetails.IsObject() {
+					for key, value := range outputDetails.Map() {
+						usage.OutputTokenDetails[key] = value.Int()
+					}
+				}
+			}
+
 			ctx.SetContext(CtxKeyInputToken, usage.InputToken)
 			ctx.SetContext(CtxKeyOutputToken, usage.OutputToken)
 			ctx.SetContext(CtxKeyTotalToken, usage.TotalToken)
-			// 存储原始的 tokenUsage JSON 字符串
+			// Store the supplemented tokenUsage JSON string
 			usageJSON, err := json.Marshal(usage)
 			if err == nil {
 				ctx.SetContext(CtxTokenUsage, string(usageJSON))
 			}
-			log.Debugf("ai-token-report: extracted token usage (non-streaming): model=%s, input=%d, output=%d, total=%d",
-				usage.Model, usage.InputToken, usage.OutputToken, usage.TotalToken)
+			log.Infof("ai-token-report: extracted token usage (non-streaming): model=%s, input=%d, output=%d, total=%d, inputDetails=%v, outputDetails=%v",
+				usage.Model, usage.InputToken, usage.OutputToken, usage.TotalToken, usage.InputTokenDetails, usage.OutputTokenDetails)
 		}
 	}
 

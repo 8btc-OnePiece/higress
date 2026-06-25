@@ -166,6 +166,13 @@ func parseConfig(json gjson.Result, config *ConsumerGroupMappingConfig, log log.
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingConfig, log log.Log) types.Action {
 	log.Debugf("=== Consumer Group Mapping Plugin: onHttpRequestHeaders called ===")
 
+	// 检查是否已经进行过 groupKey 替换（防止 ResumeHttpRequest 后重复执行）
+	// 当 need_restore 已在上下文中时，说明本插件已完成映射，不应再处理
+	if ctx.GetContext("need_restore") != nil {
+		log.Debugf("=== Consumer Group Mapping Plugin: request already mapped, skipping ===")
+		return types.ActionContinue
+	}
+
 	// 1. 获取 Authorization header 的值
 	authValue, err := proxywasm.GetHttpRequestHeader(config.AuthHeader)
 	if err != nil || authValue == "" {
@@ -270,12 +277,20 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 			log.Debugf("=== Consumer Group Mapping Plugin: fetched groupKey: %s ===", maskApiKey(groupKey))
 
 			// 7. 替换 Authorization header
-			authValue, _ := proxywasm.GetHttpRequestHeader(config.AuthHeader)
-			newAuthValue := formatAuthValue(authValue, groupKey)
+			originalAuthValue, _ := proxywasm.GetHttpRequestHeader(config.AuthHeader)
+			newAuthValue := formatAuthValue(originalAuthValue, groupKey)
+			log.Debugf("=== Consumer Group Mapping Plugin: before replace, authHeader=%s ===",
+				maskApiKey(extractApiKey(originalAuthValue)))
+
 			if err := proxywasm.ReplaceHttpRequestHeader(config.AuthHeader, newAuthValue); err != nil {
 				log.Errorf("=== Consumer Group Mapping Plugin: failed to replace auth header: %v ===", err)
 				return
 			}
+
+			// 验证替换结果
+			verifyAuth, _ := proxywasm.GetHttpRequestHeader(config.AuthHeader)
+			log.Debugf("=== Consumer Group Mapping Plugin: replace auth header success, new authHeader=%s ===",
+				maskApiKey(extractApiKey(verifyAuth)))
 
 			ctx.SetContext("group_api_key", groupKey)
 			ctx.SetContext("need_restore", true)
@@ -283,6 +298,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config ConsumerGroupMappingCo
 		},
 		uint32(config.Timeout),
 	)
+
+    log.Debugf("=== Consumer Group Mapping Plugin: async HTTP call dispatched ===")
 
 	if err != nil {
 		log.Errorf("=== Consumer Group Mapping Plugin: HTTP call failed: %v, resuming request ===", err)

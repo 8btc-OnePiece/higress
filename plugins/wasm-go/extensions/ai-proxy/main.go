@@ -181,7 +181,7 @@ func onHttpRequestHeader(ctx wrapper.HttpContext, pluginConfig config.PluginConf
 
 	if activeProvider == nil {
 		log.Debugf("[onHttpRequestHeader] no active provider, skip processing")
-		ctx.DontReadRequestBody()
+// 		ctx.DontReadRequestBody()
 		return types.ActionContinue
 	}
 
@@ -286,7 +286,8 @@ func onHttpRequestBody(ctx wrapper.HttpContext, pluginConfig config.PluginConfig
 	activeProvider := pluginConfig.GetProvider()
 
 	if activeProvider == nil {
-		log.Debugf("[onHttpRequestBody] no active provider, skip processing")
+		log.Debugf("[onHttpRequestBody] no active provider, skip processing. body=%s", string(body))
+		ctx.DontReadResponseBody()
 		return types.ActionContinue
 	}
 	log.Debugf("[onHttpRequestBody] provider=%s", activeProvider.GetProviderType())

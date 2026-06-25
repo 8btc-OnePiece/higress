@@ -21,10 +21,12 @@ const (
 
 	// 上下文键
 	ctxKeyURI          = "uri"
+	ctxKeyMethod       = "method"
 	ctxKeyModel        = "model"
 	ctxKeyProvider     = "provider"
 	ctxKeyAPIKey       = "apiKey"
 	ctxKeyRequestBody  = "requestBody"
+	ctxKeyQueryParams  = "queryParams"
 	ctxKeyStatusCode   = "statusCode"
 
 	// HTTP 头
@@ -65,6 +67,9 @@ type PluginConfig struct {
 	// @的手机号列表
 	AtMobiles []string `json:"atMobiles"`
 
+	// 忽略的状态码列表（这些状态码不会触发告警）
+	IgnoreStatusCodes []int `json:"ignoreStatusCodes"`
+
 	// HTTP 客户端（用于发送钉钉告警）
 	dingTalkClient wrapper.HttpClient
 }
@@ -91,11 +96,14 @@ type DingTalkMessage struct {
 type AlertInfo struct {
 	RequestID    string
 	URI          string
+	Method       string
 	Model        string
 	Provider     string
 	APIKey       string
 	HTTPCode     int
 	ErrorMessage string
+	RequestBody  string // 请求 body
+	QueryParams  string // GET 请求参数
 	ResponseBody string // 响应原报文
 	Timestamp    string
 	AlertLevel   string
@@ -108,6 +116,7 @@ func init() {
 		pluginName,
 		wrapper.ParseConfigBy(parseConfig),
 		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
 		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
 	)
@@ -156,6 +165,17 @@ func parseConfig(json gjson.Result, config *PluginConfig, log log.Log) error {
 		config.AtMobiles = make([]string, 0)
 		for _, mobile := range atMobilesJson.Array() {
 			config.AtMobiles = append(config.AtMobiles, mobile.String())
+		}
+	}
+
+	// 解析忽略的状态码列表
+	ignoreStatusCodesJson := json.Get("ignoreStatusCodes")
+	if ignoreStatusCodesJson.Exists() && ignoreStatusCodesJson.IsArray() {
+		config.IgnoreStatusCodes = make([]int, 0)
+		for _, code := range ignoreStatusCodesJson.Array() {
+			if code.Int() > 0 {
+				config.IgnoreStatusCodes = append(config.IgnoreStatusCodes, int(code.Int()))
+			}
 		}
 	}
 
@@ -213,6 +233,16 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.
 	}
 	ctx.SetContext(ctxKeyURI, uri)
 
+	// 获取请求 method
+	if method, err := proxywasm.GetHttpRequestHeader(":method"); err == nil && method != "" {
+		ctx.SetContext(ctxKeyMethod, method)
+	}
+
+	// 提取 GET 请求参数（:path 中的 query string 部分）
+	if idx := strings.Index(uri, "?"); idx != -1 && idx+1 < len(uri) {
+		ctx.SetContext(ctxKeyQueryParams, uri[idx+1:])
+	}
+
 	// 获取模型名称
 	model := getModelFromRequest(ctx)
 	if model != "" {
@@ -235,6 +265,19 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config PluginConfig, log log.
 	}
 
 
+	return types.ActionContinue
+}
+
+// onHttpRequestBody 获取请求 body
+func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte) types.Action {
+	if len(body) > 0 {
+		// 限制请求 body 大小（10KB）
+		maxBodySize := 10 * 1024
+		if len(body) > maxBodySize {
+			body = body[:maxBodySize]
+		}
+		ctx.SetContext(ctxKeyRequestBody, string(body))
+	}
 	return types.ActionContinue
 }
 
@@ -264,8 +307,13 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig, log log
 	// 将状态码存入上下文，供 onHttpResponseBody 使用
 	ctx.SetContext(ctxKeyStatusCode, statusCode)
 
-	// 如果是 4xx 或 5xx，需要读取响应体获取错误消息
+	// 如果是 4xx 或 5xx，且配置了忽略列表，检查是否应跳过
 	if isErrorCode(statusCode) && config.EnableAlert {
+		if shouldIgnoreStatusCode(statusCode, config.IgnoreStatusCodes) {
+			log.Debugf("status code %d is in ignore list, skip alert", statusCode)
+			ctx.DontReadResponseBody()
+			return types.ActionContinue
+		}
 		ctx.SetResponseBodyBufferLimit(10 * 1024) // 限制 10KB
 		return types.ActionContinue
 	}
@@ -331,6 +379,11 @@ func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log lo
 		info.URI = uri
 	}
 
+	// 获取 Method
+	if method, ok := ctx.GetContext(ctxKeyMethod).(string); ok {
+		info.Method = method
+	}
+
 	// 获取 Model
 	if model, ok := ctx.GetContext(ctxKeyModel).(string); ok {
 		info.Model = model
@@ -344,6 +397,16 @@ func buildAlertInfo(ctx wrapper.HttpContext, statusCode int, body []byte, log lo
 	// 获取 API Key
 	if apiKey, ok := ctx.GetContext(OriginalAPIKey).(string); ok {
 		info.APIKey = maskAPIKey(apiKey)
+	}
+
+	// 获取请求 body
+	if reqBody, ok := ctx.GetContext(ctxKeyRequestBody).(string); ok {
+		info.RequestBody = reqBody
+	}
+
+	// 获取 GET 请求参数
+	if queryParams, ok := ctx.GetContext(ctxKeyQueryParams).(string); ok {
+		info.QueryParams = queryParams
 	}
 
 	// 获取错误消息和响应原报文
@@ -443,7 +506,7 @@ func buildMarkdownMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 	var content strings.Builder
 	content.WriteString(fmt.Sprintf("### %s API调用失败告警\n\n", levelIcon))
 	content.WriteString(fmt.Sprintf("**告警级别**: %s\n\n", info.AlertLevel))
-	content.WriteString(fmt.Sprintf("**接口URI**: %s\n\n", info.URI))
+	content.WriteString(fmt.Sprintf("**接口URI**: %s %s\n\n", info.Method, info.URI))
 	content.WriteString(fmt.Sprintf("**请求状态码**: %d\n\n", info.HTTPCode))
 
 	if info.RequestID != "" {
@@ -460,6 +523,14 @@ func buildMarkdownMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 
 	if info.APIKey != "" {
 		content.WriteString(fmt.Sprintf("**API Key**: %s\n\n", info.APIKey))
+	}
+
+	if info.RequestBody != "" {
+		content.WriteString(fmt.Sprintf("**请求Body**:\n```\n%s\n```\n\n", info.RequestBody))
+	}
+
+	if info.QueryParams != "" {
+		content.WriteString(fmt.Sprintf("**请求参数**: %s\n\n", info.QueryParams))
 	}
 
 	if info.ErrorMessage != "" {
@@ -504,7 +575,7 @@ func buildTextMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 	var content strings.Builder
 	content.WriteString(fmt.Sprintf("【API调用失败告警】\n"))
 	content.WriteString(fmt.Sprintf("告警级别: %s\n", info.AlertLevel))
-	content.WriteString(fmt.Sprintf("接口URI: %s\n", info.URI))
+	content.WriteString(fmt.Sprintf("接口URI: %s %s\n", info.Method, info.URI))
 	content.WriteString(fmt.Sprintf("请求状态码: %d\n", info.HTTPCode))
 
 	if info.RequestID != "" {
@@ -521,6 +592,14 @@ func buildTextMessage(info AlertInfo, config PluginConfig) DingTalkMessage {
 
 	if info.APIKey != "" {
 		content.WriteString(fmt.Sprintf("API Key: %s\n", info.APIKey))
+	}
+
+	if info.RequestBody != "" {
+		content.WriteString(fmt.Sprintf("请求Body: %s\n", info.RequestBody))
+	}
+
+	if info.QueryParams != "" {
+		content.WriteString(fmt.Sprintf("请求参数: %s\n", info.QueryParams))
 	}
 
 	if info.ErrorMessage != "" {
@@ -596,6 +675,16 @@ func getClusterName(ctx wrapper.HttpContext) string {
 // isErrorCode 检查是否是错误状态码
 func isErrorCode(statusCode int) bool {
 	return statusCode >= 400 && statusCode < 600
+}
+
+// shouldIgnoreStatusCode 检查状态码是否在忽略列表中
+func shouldIgnoreStatusCode(statusCode int, ignoreList []int) bool {
+	for _, code := range ignoreList {
+		if code == statusCode {
+			return true
+		}
+	}
+	return false
 }
 
 // getRequestID 获取 Envoy 请求 ID
