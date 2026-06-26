@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"errors"
 
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
@@ -17,12 +18,13 @@ const (
 	// 上下文键
 	RouteName     = "route"
 	ClusterName   = "cluster"
-	ModelName     = "model"
-	ProviderName  = "provider"
+	ModelName     = "ai_model"
+	ProviderName  = "ai_cluster"
 	ConsumerKey   = "x-mse-consumer"
 	StartTimeKey  = "ai-route-monitor-start-time"
 	StatusCodeKey = "status_code"
 	UrlKey        = "url"
+	APIName                    = "api"
 )
 
 const (
@@ -86,9 +88,15 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config RouteMonitorConfig, lo
 	route := getRouteName()
 	ctx.SetContext(RouteName, route)
 
-	// 获取 upstream cluster 名称（原始值，用于 metric 维度中的 cluster 字段）
+	api, apiError := getAPIName()
+    if apiError == nil {
+        route = api
+    }
+	ctx.SetUserAttribute(APIName, api)
+
+// 	// 获取 upstream cluster 名称（原始值，用于 metric 维度中的 cluster 字段）
 	cluster := getRawClusterName()
-	ctx.SetContext(ClusterName, cluster)
+// 	ctx.SetContext(ClusterName, cluster)
 
 	// 获取服务提供者名称（从 cluster_name 解析，用于 metric 维度中的 upstream 字段）
 	provider := parseProviderName(cluster)
@@ -159,39 +167,48 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config RouteMonitorConfig, l
 // writeMetric 写入监控指标（参考 ai-statistics 指标上报模式）
 func writeMetric(ctx wrapper.HttpContext, config RouteMonitorConfig, statusCode int, log log.Log) {
 	// 从上下文获取维度信息
-	provider, ok := ctx.GetContext(ProviderName).(string)
-	if !ok {
+	route, _ := ctx.GetContext(RouteName).(string)
+	if route == "" {
+		route = "none"
+	}
+	provider, _ := ctx.GetContext(ProviderName).(string)
+	if provider == "" {
 		provider = "unknown"
 	}
-	model, ok := ctx.GetContext(ModelName).(string)
-	if !ok {
+	model, _ := ctx.GetContext(ModelName).(string)
+	if model == "" {
 		model = "unknown"
 	}
-	uri, ok := ctx.GetContext(UrlKey).(string)
-	if !ok {
+	consumer, _ := ctx.GetContext(ConsumerKey).(string)
+	if consumer == "" {
+		consumer = "none"
+	}
+	uri, _ := ctx.GetContext(UrlKey).(string)
+	if uri == "" {
 		uri = "unknown"
 	}
 
-	log.Debugf("ai-route-monitor writeMetric: provider=%s model=%s uri=%s statusCode=%d", provider, model, uri, statusCode)
+	log.Debugf("ai-route-monitor writeMetric: route=%s provider=%s model=%s consumer=%s uri=%s statusCode=%d",
+		route, provider, model, consumer, uri, statusCode)
 
 	// 记录请求计数
-	config.incrementCounter(generateMetricName(provider, model, uri, MetricRequestTotal), 1)
+	config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricRequestTotal, uri), 1)
 
 	// 根据状态码分类记录
 	if statusCode >= 200 && statusCode < 400 {
-		config.incrementCounter(generateMetricName(provider, model, uri, MetricRequestSuccess), 1)
+		config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricRequestSuccess, uri), 1)
 	} else if statusCode >= 400 && statusCode < 500 {
-		config.incrementCounter(generateMetricName(provider, model, uri, MetricRequestError4xx), 1)
+		config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricRequestError4xx, uri), 1)
 	} else if statusCode >= 500 && statusCode < 600 {
-		config.incrementCounter(generateMetricName(provider, model, uri, MetricRequestError5xx), 1)
+		config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricRequestError5xx, uri), 1)
 	}
 
 	// 记录请求耗时（毫秒）
 	if startTimeCtx := ctx.GetContext(StartTimeKey); startTimeCtx != nil {
 		if startTime, ok := startTimeCtx.(time.Time); ok {
 			elapsedMs := uint64(time.Since(startTime).Milliseconds())
-			config.incrementCounter(generateMetricName(provider, model, uri, MetricDurationMs), elapsedMs)
-			config.incrementCounter(generateMetricName(provider, model, uri, MetricDurationCount), 1)
+			config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricDurationMs, uri), elapsedMs)
+			config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricDurationCount, uri), 1)
 		}
 	}
 }
@@ -223,18 +240,26 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config RouteMonitorConfig, body
 	return types.ActionContinue
 }
 
-// writeErrorMetrics 写入非200错误异常监控指标（按 provider+model+error 维度分类）
+// writeErrorMetrics 写入非200错误异常监控指标（按 route+provider+model+consumer+error 维度分类）
 func writeErrorMetrics(ctx wrapper.HttpContext, config RouteMonitorConfig, statusCode int, body []byte, log log.Log) {
-	provider, ok := ctx.GetContext(ProviderName).(string)
-	if !ok {
+	route, _ := ctx.GetContext(RouteName).(string)
+	if route == "" {
+		route = "none"
+	}
+	provider, _ := ctx.GetContext(ProviderName).(string)
+	if provider == "" {
 		provider = "unknown"
 	}
-	model, ok := ctx.GetContext(ModelName).(string)
-	if !ok {
+	model, _ := ctx.GetContext(ModelName).(string)
+	if model == "" {
 		model = "unknown"
 	}
-	uri, ok := ctx.GetContext(UrlKey).(string)
-	if !ok {
+	consumer, _ := ctx.GetContext(ConsumerKey).(string)
+	if consumer == "" {
+		consumer = "none"
+	}
+	uri, _ := ctx.GetContext(UrlKey).(string)
+	if uri == "" {
 		uri = "unknown"
 	}
 
@@ -242,19 +267,19 @@ func writeErrorMetrics(ctx wrapper.HttpContext, config RouteMonitorConfig, statu
 	errorMsg := extractErrorMessage(body)
 
 	// 记录错误总数
-	config.incrementCounter(generateMetricName(provider, model, uri, MetricErrorCount), 1)
+	config.incrementCounter(generateMetricName(route, provider, model, consumer, MetricErrorCount, uri), 1)
 
 	// 记录按错误码分类 (如 error_code_429_count)
-	errorCodeMetric := fmt.Sprintf("%s_%d_count", MetricErrorCode, statusCode)
-	config.incrementCounter(generateMetricName(provider, model, uri, errorCodeMetric), 1)
+	errorCodeMetric := fmt.Sprintf("%s_count_%d", MetricErrorCode, statusCode)
+	config.incrementCounter(generateMetricName(route, provider, model, consumer, errorCodeMetric, uri), 1)
 
 	// 记录按错误类别分类 (如 error_type_rate_limit_count)
 	category := classifyError(statusCode, errorMsg)
-	errorCategoryMetric := fmt.Sprintf("%s_%s_count", MetricErrorType, category)
-	config.incrementCounter(generateMetricName(provider, model, uri, errorCategoryMetric), 1)
+	errorCategoryMetric := fmt.Sprintf("%s_count_%s", MetricErrorType, category)
+	config.incrementCounter(generateMetricName(route, provider, model, consumer, errorCategoryMetric, uri), 1)
 
-	log.Debugf("error metrics: provider=%s, model=%s, uri=%s, code=%d, category=%s, msg=%s",
-		provider, model, uri, statusCode, category, truncateString(errorMsg, 100))
+	log.Debugf("error metrics: route=%s provider=%s model=%s consumer=%s uri=%s code=%d category=%s msg=%s",
+		route, provider, model, consumer, uri, statusCode, category, truncateString(errorMsg, 100))
 }
 
 // classifyError 根据 HTTP 状态码和响应体错误消息进行分类
@@ -389,21 +414,30 @@ func truncateString(s string, maxLen int) string {
 }
 
 // generateMetricName 生成 Prometheus 指标名称
-// 模型字段作为路由类型判别器：
-//   - model != "unknown" → AI 模型路由: ai_model_route_monitor_{metricType}_{provider}_{model}_{uri}
-//   - model == "unknown" → 普通路由:    ai_route_monitor_{metricType}_{uri}
+// 完全对齐 ai-statistics 的 route.{}.upstream.{}.model.{}.consumer.{}.metric.{} 格式
 //
-// 动态值 sanitize 后追加在尾部，方便在 Grafana 中通过前缀快速查找
-func generateMetricName(provider, model, uri, metricType string) string {
+// Higress Envoy 内置的 stats tag 会将此格式自动解析为 Prometheus label：
+//
+//	route.RightCodes.upstream.RightCodes.model.gpt-image-2.consumer.none.metric.request_success_v1_images_generations
+//	  → metric_request_success_v1_images_generations{route="RightCodes", upstream="RightCodes", model="gpt-image-2", consumer="none"}
+//
+// 维度对应关系：provider → upstream tag, model → model tag, uri → 拼入 metric 名
+func generateMetricName(route, provider, model, consumer, metricType, uri string) string {
 	if model == "unknown" {
-		// 普通路由：不展示无意义的 provider/model 维度
-		return fmt.Sprintf("ai_route_monitor_%s_%s",
-			metricType, sanitizeMetricLabel(uri))
+		// 普通路由：model 填 none 保持格式一致
+		return fmt.Sprintf("service.route.%s.upstream.%s.model.none.consumer.%s.metric.%s_%s",
+			sanitizeMetricLabel(route),
+			sanitizeMetricLabel(provider),
+			sanitizeMetricLabel(consumer),
+			metricType,
+			sanitizeMetricLabel(uri))
 	}
-	return fmt.Sprintf("ai_model_route_monitor_%s_%s_%s_%s",
-		metricType,
+	return fmt.Sprintf("model.route.%s.upstream.%s.model.%s.consumer.%s.metric.%s_%s",
+		sanitizeMetricLabel(route),
 		sanitizeMetricLabel(provider),
 		sanitizeMetricLabel(model),
+		sanitizeMetricLabel(consumer),
+		metricType,
 		sanitizeMetricLabel(uri))
 }
 
@@ -440,6 +474,19 @@ func (config *RouteMonitorConfig) incrementCounter(metricName string, inc uint64
 		config.counterMetrics[metricName] = counter
 	}
 	counter.Increment(inc)
+}
+
+func getAPIName() (string, error) {
+	if raw, err := proxywasm.GetProperty([]string{"route_name"}); err != nil {
+		return "-", err
+	} else {
+		parts := strings.Split(string(raw), "@")
+		if len(parts) < 3 {
+			return "-", errors.New("not api type")
+		} else {
+			return strings.Join(parts[:3], "@"), nil
+		}
+	}
 }
 
 // getRouteName 从 Envoy 属性获取路由名称
