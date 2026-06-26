@@ -425,14 +425,14 @@ func truncateString(s string, maxLen int) string {
 func generateMetricName(route, provider, model, consumer, metricType, uri string) string {
 	if model == "unknown" {
 		// 普通路由：model 填 none 保持格式一致
-		return fmt.Sprintf("service.route.%s.upstream.%s.model.none.consumer.%s.metric.%s_%s",
+		return fmt.Sprintf("route.%s.upstream.%s.model.none.consumer.%s.metric.%s_%s",
 			sanitizeMetricLabel(route),
 			sanitizeMetricLabel(provider),
 			sanitizeMetricLabel(consumer),
 			metricType,
 			sanitizeMetricLabel(uri))
 	}
-	return fmt.Sprintf("model.route.%s.upstream.%s.model.%s.consumer.%s.metric.%s_%s",
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.metric.%s_%s",
 		sanitizeMetricLabel(route),
 		sanitizeMetricLabel(provider),
 		sanitizeMetricLabel(model),
