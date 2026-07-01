@@ -42,6 +42,8 @@ const (
 
 	// Default disableOpenaiUsage value
 	defaultDisableOpenaiUsage = false
+
+	canonicalRequestIDKey = "wasm.canonicalRequestID"
 )
 
 // TokenUsageReportRequest represents the request body for token usage reporting
@@ -232,6 +234,22 @@ func getRequestModel() string {
 	return ""
 }
 
+// getCanonicalRequestID reads the canonical request-id set by ai-request-id-header plugin.
+func getCanonicalRequestID() string {
+	if value, err := proxywasm.GetProperty([]string{canonicalRequestIDKey}); err == nil {
+		if id := normalizeRequestID(string(value)); id != "" {
+			return id
+		}
+	}
+
+	if value, err := proxywasm.GetHttpRequestHeader("request-id"); err == nil {
+		if id := normalizeRequestID(value); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 func getRequestID() string {
 	if value, err := proxywasm.GetProperty([]string{"x_request_id"}); err == nil {
 		if requestID := normalizeRequestID(string(value)); requestID != "" {
@@ -411,15 +429,18 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 	}
 
 	timestamp := time.Now().UnixMilli()
-	var requestID string
-	upstreamRequestID := getRequestID()
-	if upstreamRequestID != "" {
-		requestID = upstreamRequestID
-		log.Debugf("reportTokenUsage using upstream request ID: %s", upstreamRequestID)
+	requestID := getCanonicalRequestID()
+	if requestID != "" {
+		log.Debugf("reportTokenUsage using canonical request ID: %s", requestID)
 	} else {
-		randomSuffix := generateRandomString(8)
-		requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)
-		log.Debugf("reportTokenUsage using generated ID: %s", requestID)
+		requestID = getRequestID()
+		if requestID != "" {
+			log.Debugf("reportTokenUsage using raw request ID: %s", requestID)
+		} else {
+			randomSuffix := generateRandomString(8)
+			requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)
+			log.Debugf("reportTokenUsage using generated ID: %s", requestID)
+		}
 	}
 
 	// Build request body

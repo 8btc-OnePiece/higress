@@ -11,7 +11,7 @@ AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定�
 - ✅ **异步上报**：非阻塞式上报，不影响主流程性能
 - ✅ **配置化**：支持配置上报 API 地址、服务名、超时时间
 - ✅ **错误处理**：内置 panic recovery，确保上报失败不会影响主流程
-- ✅ **ID 生成**：优先使用有效 Envoy request ID（非空且不为 `-`），否则生成唯一 ID
+- ✅ **ID 一致性**：优先使用 `ai-request-id-header` 写入的 canonical request-id，保证上报 body 与响应/业务上游 header 一致
 
 ## 配置说明
 
@@ -67,7 +67,7 @@ AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定�
 
 | 字段名 | 类型 | 说明 |
 |---------|------|------|
-| `requestId` | string | 请求唯一 ID，格式：`{random8位}{timestamp毫秒}` 或使用有效 Envoy request ID（非空且不为 `-`） |
+| `requestId` | string | 请求唯一 ID。优先读取 `wasm.canonicalRequestID`，其次读取业务上游 `request-id` header，再 fallback 到有效 Envoy request ID（非空且不为 `-`）或本地生成 ID。 |
 | `model` | string | 模型名称（从请求体中提取） |
 | `userKey` | string | 用户 Key（从 `X-Original-Api-Key` header 获取） |
 | `inputToken` | integer | 输入 token 数 |
@@ -77,6 +77,22 @@ AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定�
 | `timestamp` | integer | 时间戳（毫秒） |
 
 ## 使用场景
+
+### 0. requestId 来源
+
+推荐插件执行顺序：
+
+```text
+ai-proxy -> ai-request-id-header -> ai-token-report
+```
+
+`ai-token-report` 会优先读取 `ai-request-id-header` 写入的请求内属性：
+
+```go
+proxywasm.GetProperty([]string{"wasm.canonicalRequestID"})
+```
+
+如果属性不存在，则回退读取 `request-id` / `x-request-id` / Envoy `x_request_id`，最后才生成本地 ID。AI provider 路由不会因为该共享属性额外收到业务 `request-id` header。
 
 ### 1. 流式响应（SSE）
 

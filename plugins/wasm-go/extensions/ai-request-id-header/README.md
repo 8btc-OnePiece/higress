@@ -7,6 +7,7 @@ AI Request ID Header 插件用于在网关侧传播同一个 request ID：
 - request headers 阶段写入 upstream `request-id`，便于 open-platform 等上游服务读取；
 - response headers 阶段写入客户端响应头 `request-id`，便于客户端本地 session 记录；
 - 与 `ai-token-report` 使用同一 request ID 来源，保证 token usage 上报与 header 链路一致。
+- 可按 Envoy request id 追加 HMAC 签名段，生成可信 canonical request-id，避免直接透传外部伪造 ID。
 
 ## 核心行为
 
@@ -16,6 +17,20 @@ AI Request ID Header 插件用于在网关侧传播同一个 request ID：
 proxywasm.GetProperty([]string{"x_request_id"})
 proxywasm.GetHttpRequestHeader("request-id")
 proxywasm.GetHttpRequestHeader("x-request-id")
+```
+
+- 当配置 `signatureSecret` 后，插件会生成或校验 canonical request-id：
+
+```text
+<envoy-request-id>-<sig8>
+```
+
+其中 `sig8` 默认为 `HMAC-SHA256(rawRequestID, signatureSecret)` 的前 8 位 hex 字符。外部传入的 `request-id` 只有签名校验通过才会复用；校验失败、格式不合法或为空时，基于 Envoy `x_request_id` 重新生成。Envoy request id 也不可用时，才 fallback 生成本地 UUID 并签名。
+
+- 请求阶段会把最终 request id 写入请求内属性，供后续插件读取：
+
+```go
+proxywasm.SetProperty([]string{"wasm.canonicalRequestID"}, []byte("<canonical request id>"))
 ```
 
 - 当 request ID 非空且不为 `-`，且请求不是转发给 AI 提供商时，在 request headers 阶段写入 upstream header：
@@ -46,15 +61,27 @@ response headers 阶段不进行该判断——响应头只返回给客户端，
 
 ```json
 {
-  "skipClusterNamePatterns": ["llm-", "right-codes.dns", "right-codes-v2.dns"]
+  "skipClusterNamePatterns": ["llm-", "right-codes.dns", "right-codes-v2.dns"],
+  "signatureSecret": "<secret>",
+  "signatureLength": 8
 }
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `skipClusterNamePatterns` | `[]string` | `["llm-"]` | cluster_name 子串匹配列表，命中任一则跳过 upstream `request-id` 注入。传空数组 `[]` 可关闭 cluster_name 兜底（仅依赖 `wasm.providerType`）。 |
+| `signatureSecret` | `string` | `""` | canonical request-id 签名密钥。为空时保持旧行为，不启用签名校验，不阻断主链路。 |
+| `signatureLength` | `int` | `8` | 签名截断长度，允许范围 4-64；超出范围时使用默认值。 |
 
 默认 `["llm-"]` 对应集群命名约定（`llm-RightCodes.internal.dns` 等 AI 提供商 cluster 均带此前缀）。若存在不带 `llm-` 前缀的直连 AI 路由（如 `right-codes.dns`），需在配置中追加对应 cluster 名。
+
+推荐插件执行顺序：
+
+```text
+ai-proxy -> ai-request-id-header -> ai-token-report
+```
+
+`ai-request-id-header` 需要在 `ai-proxy` 之后读取 `wasm.providerType`，`ai-token-report` 需要在其之后读取 `wasm.canonicalRequestID`。
 
 ## 构建
 
