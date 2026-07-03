@@ -13,6 +13,7 @@ import (
 const (
 	responseRequestIDHeader = "request-id"
 	upstreamRequestIDHeader = "request-id"
+	requestIDPropertyKey    = "wasm.requestId"
 	providerTypePropertyKey = "wasm.providerType"
 	clusterNameProperty     = "cluster_name"
 )
@@ -55,11 +56,18 @@ func parseConfig(json gjson.Result, config *RequestIDHeaderConfig) error {
 }
 
 func onHttpRequestHeaders(_ wrapper.HttpContext, config RequestIDHeaderConfig) types.Action {
+	requestID := getRequestID()
+	if requestID != "" {
+		_ = proxywasm.SetProperty([]string{requestIDPropertyKey}, []byte(requestID))
+	}
+
 	if shouldSkipForAIProvider(config) {
+		if err := proxywasm.RemoveHttpRequestHeader(upstreamRequestIDHeader); err != nil {
+			log.Warnf("ai-request-id-header: failed to remove upstream request header: %v", err)
+		}
 		return types.ActionContinue
 	}
 
-	requestID := getRequestID()
 	if requestID == "" {
 		return types.ActionContinue
 	}
@@ -117,17 +125,27 @@ func onHttpResponseHeaders(_ wrapper.HttpContext, _ RequestIDHeaderConfig) types
 }
 
 func getRequestID() string {
+	if value, err := proxywasm.GetHttpRequestHeader(upstreamRequestIDHeader); err == nil {
+		if requestID := normalizeRequestID(value); requestID != "" {
+			return requestID
+		}
+	}
+
+	if value, err := proxywasm.GetProperty([]string{requestIDPropertyKey}); err == nil {
+		if requestID := normalizeRequestID(string(value)); requestID != "" {
+			return requestID
+		}
+	}
+
 	if value, err := proxywasm.GetProperty([]string{"x_request_id"}); err == nil {
 		if requestID := normalizeRequestID(string(value)); requestID != "" {
 			return requestID
 		}
 	}
 
-	for _, header := range []string{upstreamRequestIDHeader, "x-request-id"} {
-		if value, err := proxywasm.GetHttpRequestHeader(header); err == nil {
-			if requestID := normalizeRequestID(value); requestID != "" {
-				return requestID
-			}
+	if value, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
+		if requestID := normalizeRequestID(value); requestID != "" {
+			return requestID
 		}
 	}
 

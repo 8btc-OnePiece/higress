@@ -39,7 +39,7 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			host.CompleteHttp()
 		})
 
-		t.Run("replaces existing request-id with shared request ID", func(t *testing.T) {
+		t.Run("preserves existing request-id over x_request_id", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
@@ -53,7 +53,10 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			require.Equal(t, types.ActionContinue, action)
 			value, ok := test.GetHeaderValue(host.GetRequestHeaders(), upstreamRequestIDHeader)
 			require.True(t, ok)
-			require.Equal(t, "x-req-456", value)
+			require.Equal(t, "old-req", value)
+			propertyValue, err := host.GetProperty([]string{requestIDPropertyKey})
+			require.NoError(t, err)
+			require.Equal(t, "old-req", string(propertyValue))
 			host.CompleteHttp()
 		})
 
@@ -88,6 +91,27 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			host.CompleteHttp()
+		})
+
+		t.Run("removes existing request-id when ai-proxy set providerType", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.NoError(t, host.SetRequestId("x-req-ai"))
+			require.NoError(t, host.SetProperty([]string{providerTypePropertyKey}, []byte("openai")))
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "api.openai.com"},
+				{upstreamRequestIDHeader, "biz-req-ai"},
+			})
+
+			require.Equal(t, types.ActionContinue, action)
+			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			propertyValue, err := host.GetProperty([]string{requestIDPropertyKey})
+			require.NoError(t, err)
+			require.Equal(t, "biz-req-ai", string(propertyValue))
 			host.CompleteHttp()
 		})
 
@@ -146,6 +170,26 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 func TestOnHttpResponseHeaders(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
+		t.Run("sets request-id from existing request-id", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{upstreamRequestIDHeader, "biz-req-123"},
+				{"x-request-id", "x-req-123"},
+			}))
+
+			action := host.CallOnHttpResponseHeaders([][2]string{
+				{":status", "200"},
+			})
+
+			require.Equal(t, types.ActionContinue, action)
+			require.True(t, test.HasHeaderWithValue(host.GetResponseHeaders(), responseRequestIDHeader, "biz-req-123"))
+			host.CompleteHttp()
+		})
+
 		t.Run("sets request-id from x_request_id", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
@@ -202,13 +246,31 @@ func TestOnHttpResponseHeaders(t *testing.T) {
 
 func TestGetRequestID(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
+		t.Run("returns existing request-id before x_request_id", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{upstreamRequestIDHeader, "biz-req-123"},
+				{"x-request-id", "x-req-123"},
+			}))
+			require.Equal(t, "biz-req-123", getRequestID())
+			host.CompleteHttp()
+		})
+
 		t.Run("returns x_request_id", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetRequestId("x-req-123"))
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{"x-request-id", "x-req-123"},
+			}))
 			require.Equal(t, "x-req-123", getRequestID())
+			host.CompleteHttp()
 		})
 
 		t.Run("falls back to legacy x-request-id header when property is unusable", func(t *testing.T) {
@@ -229,8 +291,12 @@ func TestGetRequestID(t *testing.T) {
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
-			require.NoError(t, host.SetRequestId(" x-req-456 "))
+			require.Equal(t, types.ActionContinue, host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+				{"x-request-id", " x-req-456 "},
+			}))
 			require.Equal(t, "x-req-456", getRequestID())
+			host.CompleteHttp()
 		})
 	})
 }
