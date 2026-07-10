@@ -21,8 +21,49 @@ func configWithSkipPatterns(patterns []string) json.RawMessage {
 	return data
 }
 
+const clearRouteCacheSentinel = "__no_reroute__"
+
+func assertClearRouteCacheOff(t *testing.T, host test.TestHost) {
+	t.Helper()
+	val, err := host.GetProperty([]string{"clear_route_cache"})
+	require.NoError(t, err, "expected clear_route_cache to be set (DisableReroute must be called before header mutation)")
+	require.Equal(t, "off", string(val))
+}
+
+// seedNonMutation pre-seeds clear_route_cache with a sentinel before calling onHttpRequestHeaders.
+// Use assertClearRouteCacheNotMutated after the call to verify DisableReroute was not invoked.
+func seedNonMutation(t *testing.T, host test.TestHost) {
+	t.Helper()
+	require.NoError(t, host.SetProperty([]string{"clear_route_cache"}, []byte(clearRouteCacheSentinel)))
+}
+
+func assertClearRouteCacheNotMutated(t *testing.T, host test.TestHost) {
+	t.Helper()
+	val, err := host.GetProperty([]string{"clear_route_cache"})
+	require.NoError(t, err)
+	require.Equal(t, clearRouteCacheSentinel, string(val), "DisableReroute must not be called when no header mutation occurs")
+}
+
 func TestOnHttpRequestHeaders(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
+		t.Run("no mutation when request-id normalizes to empty", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			// "-" normalizes to empty: getRequestID returns "" → no header mutation.
+			require.NoError(t, host.SetRequestId("-"))
+			seedNonMutation(t, host)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "example.com"},
+			})
+
+			require.Equal(t, types.ActionContinue, action)
+			assertClearRouteCacheNotMutated(t, host)
+			host.CompleteHttp()
+		})
+
 		t.Run("injects request-id from x_request_id", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
@@ -36,6 +77,7 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.True(t, test.HasHeaderWithValue(host.GetRequestHeaders(), upstreamRequestIDHeader, "x-req-123"))
+			assertClearRouteCacheOff(t, host)
 			host.CompleteHttp()
 		})
 
@@ -57,15 +99,17 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			propertyValue, err := host.GetProperty([]string{requestIDPropertyKey})
 			require.NoError(t, err)
 			require.Equal(t, "old-req", string(propertyValue))
+			assertClearRouteCacheOff(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("skips dash request ID", func(t *testing.T) {
+		t.Run("skips dash request ID without mutating headers", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
 			require.NoError(t, host.SetRequestId("-"))
+			seedNonMutation(t, host)
 
 			action := host.CallOnHttpRequestHeaders([][2]string{
 				{":authority", "example.com"},
@@ -74,16 +118,18 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.True(t, test.HasHeaderWithValue(host.GetRequestHeaders(), upstreamRequestIDHeader, "-"))
+			assertClearRouteCacheNotMutated(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("skips injection when ai-proxy set providerType", func(t *testing.T) {
+		t.Run("no mutation when providerType skip and no request-id header", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
 			require.NoError(t, host.SetRequestId("x-req-ai"))
 			require.NoError(t, host.SetProperty([]string{providerTypePropertyKey}, []byte("openai")))
+			seedNonMutation(t, host)
 
 			action := host.CallOnHttpRequestHeaders([][2]string{
 				{":authority", "api.openai.com"},
@@ -91,10 +137,11 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			assertClearRouteCacheNotMutated(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("removes existing request-id when ai-proxy set providerType", func(t *testing.T) {
+		t.Run("removes existing request-id and disables reroute when providerType skip", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
@@ -112,10 +159,30 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 			propertyValue, err := host.GetProperty([]string{requestIDPropertyKey})
 			require.NoError(t, err)
 			require.Equal(t, "biz-req-ai", string(propertyValue))
+			assertClearRouteCacheOff(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("skips injection when cluster_name matches default llm- pattern", func(t *testing.T) {
+		t.Run("no mutation when cluster_name skip and no request-id header", func(t *testing.T) {
+			host, status := test.NewTestHost(emptyConfig)
+			defer host.Reset()
+			require.Equal(t, types.OnPluginStartStatusOK, status)
+
+			require.NoError(t, host.SetRequestId("x-req-llm"))
+			require.NoError(t, host.SetClusterName("outbound|443||llm-RightCodes.internal.dns"))
+			seedNonMutation(t, host)
+
+			action := host.CallOnHttpRequestHeaders([][2]string{
+				{":authority", "www.right.codes"},
+			})
+
+			require.Equal(t, types.ActionContinue, action)
+			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			assertClearRouteCacheNotMutated(t, host)
+			host.CompleteHttp()
+		})
+
+		t.Run("removes existing request-id and disables reroute when cluster_name skip", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
@@ -125,20 +192,26 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			action := host.CallOnHttpRequestHeaders([][2]string{
 				{":authority", "www.right.codes"},
+				{upstreamRequestIDHeader, "biz-req-llm"},
 			})
 
 			require.Equal(t, types.ActionContinue, action)
 			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			propertyValue, err := host.GetProperty([]string{requestIDPropertyKey})
+			require.NoError(t, err)
+			require.Equal(t, "biz-req-llm", string(propertyValue))
+			assertClearRouteCacheOff(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("skips injection when cluster_name matches configured pattern", func(t *testing.T) {
+		t.Run("no mutation when configured cluster_name skip and no request-id header", func(t *testing.T) {
 			host, status := test.NewTestHost(configWithSkipPatterns([]string{"right-codes.dns"}))
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
 
 			require.NoError(t, host.SetRequestId("x-req-direct"))
 			require.NoError(t, host.SetClusterName("outbound|443||right-codes.dns"))
+			seedNonMutation(t, host)
 
 			action := host.CallOnHttpRequestHeaders([][2]string{
 				{":authority", "www.right.codes"},
@@ -146,10 +219,11 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.False(t, test.HasHeader(host.GetRequestHeaders(), upstreamRequestIDHeader))
+			assertClearRouteCacheNotMutated(t, host)
 			host.CompleteHttp()
 		})
 
-		t.Run("still injects when cluster_name does not match patterns", func(t *testing.T) {
+		t.Run("still injects and disables reroute when cluster_name does not match patterns", func(t *testing.T) {
 			host, status := test.NewTestHost(emptyConfig)
 			defer host.Reset()
 			require.Equal(t, types.OnPluginStartStatusOK, status)
@@ -163,6 +237,7 @@ func TestOnHttpRequestHeaders(t *testing.T) {
 
 			require.Equal(t, types.ActionContinue, action)
 			require.True(t, test.HasHeaderWithValue(host.GetRequestHeaders(), upstreamRequestIDHeader, "x-req-biz"))
+			assertClearRouteCacheOff(t, host)
 			host.CompleteHttp()
 		})
 	})

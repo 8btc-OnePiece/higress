@@ -66,6 +66,18 @@ go test ./...
 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o main.wasm ./
 ```
 
+## Request Header Mutation 与路由缓存约束
+
+插件在 request headers 阶段对 `request-id` 发生任何 mutation（write 或 remove）**前**，必须先调用 `ctx.DisableReroute()`（等价于设置 Envoy 属性 `clear_route_cache=off`）。
+
+**根因**：Envoy/Higress 默认在 Wasm 插件修改请求头后重新计算路由（清理 route cache）。`ai-proxy` 会将入口路径（如 `/v1/images/edits`）改写为上游内部路径（如 `/openai/v1/images/edits`），并调用 `DisableReroute()` 防止路由重算。若本插件在此之后再次修改请求头且未关闭 route cache 清理，Envoy 会以已改写的路径重新匹配入口路由，导致匹配失败（`404 NR route_not_found`）。
+
+**执行规则**：
+
+- skip 分支（provider/cluster 判断为 AI 路由）：先读取 `request-id` 请求头，仅在值非空时才调用 `DisableReroute()` 然后执行 remove；不存在时直接跳过，避免无意义的 mutation。
+- 非 skip 分支：仅在实际写入/替换非空 `request-id` 时调用 `DisableReroute()`；requestID 为空时提前返回，不产生 mutation。
+- 若未来新增其它 request header mutation，必须遵循同样的约束：mutation 前先调用 `DisableReroute()`。
+
 ## 说明
 
 该插件只处理 request/response headers，不读取请求体或响应体。`ai-token-report` 使用同一个 request ID 作为上报体中的 `requestId`；当 AI provider 路由删除 upstream `request-id` 后，`ai-token-report` 可通过 `wasm.requestId` 继续读取该业务 ID。

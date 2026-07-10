@@ -55,15 +55,22 @@ func parseConfig(json gjson.Result, config *RequestIDHeaderConfig) error {
 	return nil
 }
 
-func onHttpRequestHeaders(_ wrapper.HttpContext, config RequestIDHeaderConfig) types.Action {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, config RequestIDHeaderConfig) types.Action {
 	requestID := getRequestID()
 	if requestID != "" {
 		_ = proxywasm.SetProperty([]string{requestIDPropertyKey}, []byte(requestID))
 	}
 
 	if shouldSkipForAIProvider(config) {
-		if err := proxywasm.RemoveHttpRequestHeader(upstreamRequestIDHeader); err != nil {
-			log.Warnf("ai-request-id-header: failed to remove upstream request header: %v", err)
+		// Only mutate if a non-empty request-id header is actually present; otherwise
+		// there is nothing to remove and triggering a header mutation would unnecessarily
+		// clear the route cache that ai-proxy already locked via DisableReroute.
+		existing, err := proxywasm.GetHttpRequestHeader(upstreamRequestIDHeader)
+		if err == nil && normalizeRequestID(existing) != "" {
+			ctx.DisableReroute()
+			if err := proxywasm.RemoveHttpRequestHeader(upstreamRequestIDHeader); err != nil {
+				log.Warnf("ai-request-id-header: failed to remove upstream request header: %v", err)
+			}
 		}
 		return types.ActionContinue
 	}
@@ -72,6 +79,7 @@ func onHttpRequestHeaders(_ wrapper.HttpContext, config RequestIDHeaderConfig) t
 		return types.ActionContinue
 	}
 
+	ctx.DisableReroute()
 	if err := proxywasm.ReplaceHttpRequestHeader(upstreamRequestIDHeader, requestID); err != nil {
 		log.Warnf("ai-request-id-header: failed to set upstream request header: %v", err)
 	}
