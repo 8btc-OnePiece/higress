@@ -523,3 +523,101 @@ func TestResponsesWireShapeStability(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertResponsesRequestToChat_ParallelFunctionCallsMergedIntoOneAssistant(t *testing.T) {
+	// codex 一轮并行多工具调用：Responses 输入是连续多个 function_call item
+	// （可被 reasoning item 隔开），后跟各自的 function_call_output。桥必须
+	// 把相邻 function_call 合并为一条 assistant 消息的多元素 tool_calls——
+	// 逐条映射会产出 assistant(tool_calls) 后紧跟另一条 assistant 的非法
+	// chat 序列，DeepSeek 校验报 insufficient tool messages。
+	body := `{
+		"model": "deepseek-flash",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run both"}]},
+			{"type":"reasoning","summary":[]},
+			{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"a\"}","call_id":"call_1"},
+			{"type":"reasoning","summary":[]},
+			{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"b\"}","call_id":"call_2"},
+			{"type":"function_call_output","call_id":"call_1","output":"out_a"},
+			{"type":"function_call_output","call_id":"call_2","output":"out_b"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"done"}]}
+		],
+		"tools": [{"type":"function","name":"shell","parameters":{"type":"object"}}],
+		"stream": false,
+		"store": false
+	}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := gjson.ParseBytes(out)
+	msgs := g.Get("messages").Array()
+	// system? 无 instructions → user + assistant(双 tool_calls) + tool + tool + user
+	if len(msgs) != 5 {
+		t.Fatalf("messages len = %d, want 5: %s", len(msgs), out)
+	}
+	if msgs[0].Get("role").String() != "user" {
+		t.Errorf("msg0 role = %v, want user", msgs[0].Get("role"))
+	}
+	assistant := msgs[1]
+	if assistant.Get("role").String() != "assistant" {
+		t.Fatalf("msg1 role = %v, want assistant (merged parallel calls)", assistant.Get("role"))
+	}
+	calls := assistant.Get("tool_calls").Array()
+	if len(calls) != 2 {
+		t.Fatalf("merged tool_calls len = %d, want 2: %s", len(calls), out)
+	}
+	if calls[0].Get("id").String() != "call_1" || calls[0].Get("function.arguments").String() != `{"cmd":"a"}` {
+		t.Errorf("tool_call[0] wrong: %v", calls[0])
+	}
+	if calls[1].Get("id").String() != "call_2" || calls[1].Get("function.arguments").String() != `{"cmd":"b"}` {
+		t.Errorf("tool_call[1] wrong: %v", calls[1])
+	}
+	if msgs[2].Get("role").String() != "tool" || msgs[2].Get("tool_call_id").String() != "call_1" {
+		t.Errorf("msg2 wrong: %v", msgs[2])
+	}
+	if msgs[3].Get("role").String() != "tool" || msgs[3].Get("tool_call_id").String() != "call_2" {
+		t.Errorf("msg3 wrong: %v", msgs[3])
+	}
+	if msgs[4].Get("role").String() != "user" || msgs[4].Get("content.0.text").String() != "done" {
+		t.Errorf("msg4 wrong: %v", msgs[4])
+	}
+}
+
+func TestConvertResponsesRequestToChat_InterleavedCallOutputPairsStaysValid(t *testing.T) {
+	// call/output 交错形态（call_1, out_1, call_2, out_2）：合并遇 output
+	// 即落盘，产出 assistant(call_1)/tool(call_1)/assistant(call_2)/tool(call_2)，
+	// 每段各自合法。
+	body := `{
+		"model": "deepseek-flash",
+		"input": [
+			{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"},
+			{"type":"function_call_output","call_id":"c1","output":"o1"},
+			{"type":"function_call","name":"shell","arguments":"{}","call_id":"c2"},
+			{"type":"function_call_output","call_id":"c2","output":"o2"}
+		],
+		"store": false
+	}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := gjson.ParseBytes(out)
+	msgs := g.Get("messages").Array()
+	if len(msgs) != 4 {
+		t.Fatalf("messages len = %d, want 4: %s", len(msgs), out)
+	}
+	roles := []string{}
+	for _, m := range msgs {
+		roles = append(roles, m.Get("role").String())
+	}
+	want := []string{"assistant", "tool", "assistant", "tool"}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("roles = %v, want %v", roles, want)
+		}
+	}
+	if msgs[0].Get("tool_calls.0.id").String() != "c1" || msgs[2].Get("tool_calls.0.id").String() != "c2" {
+		t.Errorf("pair grouping wrong: %s", out)
+	}
+}

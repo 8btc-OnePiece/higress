@@ -76,7 +76,41 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 				"content": inputValue.String(),
 			})
 		case gjson.JSON:
+			// 相邻 function_call items 必须合并为一条 assistant 消息的多元素
+			// tool_calls：codex 一轮并行多工具调用在 Responses 输入里是连续
+			// 多个 function_call item，逐条映射会产出「assistant(tool_calls)
+			// 后紧跟另一条 assistant」的非法 chat 序列，DeepSeek 等上游校验
+			// 直接报 insufficient tool messages following tool_calls message。
+			var pendingCalls []interface{}
+			flushPendingCalls := func() {
+				if len(pendingCalls) == 0 {
+					return
+				}
+				messages = append(messages, map[string]interface{}{
+					"role":       "assistant",
+					"tool_calls": pendingCalls,
+				})
+				pendingCalls = nil
+			}
 			for _, item := range inputValue.Array() {
+				itemType := item.Get("type").String()
+				if itemType == "function_call" {
+					pendingCalls = append(pendingCalls, map[string]interface{}{
+						"id":   item.Get("call_id").String(),
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      item.Get("name").String(),
+							"arguments": item.Get("arguments").String(),
+						},
+					})
+					continue
+				}
+				// reasoning 无 chat 对应物，跳过且不拆散相邻调用组
+				//（codex 会在同一轮的并行调用之间插入 reasoning item）。
+				if itemType == "reasoning" {
+					continue
+				}
+				flushPendingCalls()
 				msg, err := responsesInputItemToChatMessage(item)
 				if err != nil {
 					return nil, err
@@ -85,6 +119,7 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 					messages = append(messages, msg)
 				}
 			}
+			flushPendingCalls()
 		default:
 			return nil, fmt.Errorf("unsupported responses input type: %v", inputValue.Type)
 		}
