@@ -831,3 +831,65 @@ func TestStreamConversion_ReasoningEvents(t *testing.T) {
 		t.Errorf("reasoning id mismatch: added=%s done=%s", openItems["reasoning"], doneItem.Get("id"))
 	}
 }
+
+func TestConvertResponsesRequestToChat_ReasoningPlaceholderWhenTools(t *testing.T) {
+	// OPE-9733 线级实证：带 tools 时上游对历史 assistant 轮次无条件要求
+	// reasoning_content（即使模型上一轮自适应跳过思考）。桥必须兜底占位。
+	body := `{"model":"deepseek-flash","input":[
+		{"type":"message","role":"user","content":"q"},
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"},
+		{"type":"function_call_output","call_id":"c1","output":"ok"},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+	],"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs := gjson.ParseBytes(out).Get("messages").Array()
+	// user / assistant(tool_calls) / tool / assistant(text)
+	if len(msgs) != 4 {
+		t.Fatalf("messages len = %d, want 4", len(msgs))
+	}
+	if msgs[1].Get("reasoning_content").String() != "(no reasoning content recorded)" {
+		t.Errorf("tool_calls assistant must get placeholder, got %q", msgs[1].Get("reasoning_content").String())
+	}
+	if msgs[3].Get("reasoning_content").String() != "(no reasoning content recorded)" {
+		t.Errorf("text assistant must get placeholder, got %q", msgs[3].Get("reasoning_content").String())
+	}
+	for _, i := range []int{0, 2} {
+		if msgs[i].Get("reasoning_content").Exists() {
+			t.Errorf("msg%d (role=%s) must not carry reasoning_content", i, msgs[i].Get("role").String())
+		}
+	}
+
+	// 无 tools 的请求不注入占位
+	body2 := `{"model":"m","input":[
+		{"type":"message","role":"user","content":"q"},
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"},
+		{"type":"function_call_output","call_id":"c1","output":"ok"}
+	]}`
+	out2, err := ConvertResponsesRequestToChat([]byte(body2))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs2 := gjson.ParseBytes(out2).Get("messages").Array()
+	if msgs2[1].Get("reasoning_content").Exists() {
+		t.Errorf("no-tools request must not inject placeholder")
+	}
+
+	// 已有真实思考文本时不被占位覆盖
+	body3 := `{"model":"m","input":[
+		{"type":"message","role":"user","content":"q"},
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"真实思考"}]},
+		{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"},
+		{"type":"function_call_output","call_id":"c1","output":"ok"}
+	],"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]}`
+	out3, err := ConvertResponsesRequestToChat([]byte(body3))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs3 := gjson.ParseBytes(out3).Get("messages").Array()
+	if msgs3[1].Get("reasoning_content").String() != "真实思考" {
+		t.Errorf("real reasoning must be preserved, got %q", msgs3[1].Get("reasoning_content").String())
+	}
+}

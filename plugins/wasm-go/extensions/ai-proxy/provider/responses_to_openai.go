@@ -182,6 +182,18 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 		}
 		if len(chatTools) > 0 {
 			chatRequest["tools"] = chatTools
+			// thinking 上游（DeepSeek V4.1-Flash 线级探针实证，OPE-9733）：请求带
+			// tools 且历史含 assistant 轮次时无条件校验 reasoning_content——即使
+			// 上一轮模型自适应跳过思考、未产出任何推理内容，回放也必须带该字段，
+			// 否则 400 拒绝整轮。对没有缓冲到思考文本的 assistant 轮次补非空占位
+			//（上游实测接受任意非空文本，仅作上下文消费，不影响 codex 侧）。
+			for _, m := range messages {
+				if m["role"] == "assistant" {
+					if _, ok := m["reasoning_content"]; !ok {
+						m["reasoning_content"] = "(no reasoning content recorded)"
+					}
+				}
+			}
 			if tc := gjson.GetBytes(body, "tool_choice"); tc.Exists() {
 				if tc.Type == gjson.String {
 					chatRequest["tool_choice"] = tc.String()
