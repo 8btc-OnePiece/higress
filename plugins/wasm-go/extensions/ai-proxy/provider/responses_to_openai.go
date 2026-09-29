@@ -39,12 +39,18 @@ const (
 //
 //	instructions            → 首条 system 消息
 //	input (string|array)    → messages（message/function_call/function_call_output
-//	                          /reasoning 四类 item；reasoning 丢弃——chat 协议无对应物）
+//	                          /reasoning 四类 item；reasoning 回填到所属 assistant
+//	                          轮次的 reasoning_content 字段，见下）
 //	tools                   → chat tools（去掉 openai 专属的 strict 字段）
 //	tool_choice             → chat tool_choice（对象形态 name → function.name）
 //	max_output_tokens       → max_tokens
 //	temperature/top_p/stream/parallel_tool_calls → 原样保留
 //	stream=true 时强制 stream_options.include_usage=true（计量依赖终块 usage）
+//
+// reasoning 回填是 thinking 模型上游的硬契约（OPE-9733）：DeepSeek 等 thinking
+// 模式上游要求「thinking + tools 并存时，历史 assistant 消息必须带回
+// reasoning_content」，缺失即 400 拒绝整轮请求。响应向会把上游思考内容升维成
+// Responses reasoning item 交给 codex 存档，本函数负责回放时的逆向降维。
 //
 // 显式拒绝（返回错误）：previous_response_id、store=true、background=true、
 // item_reference——这些语义无法在 chat 协议无损表达。
@@ -82,14 +88,26 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 			// 后紧跟另一条 assistant」的非法 chat 序列，DeepSeek 等上游校验
 			// 直接报 insufficient tool messages following tool_calls message。
 			var pendingCalls []interface{}
+			// reasoning item 与 function_call 同规则缓冲：它属于紧接着的
+			// assistant 轮次（codex 会在同一轮的并行调用之间插入 reasoning
+			// item，缓冲同时保证不拆散调用组）。
+			var pendingReasoning []string
+			attachReasoning := func(msg map[string]interface{}) {
+				if text := joinReasoningText(pendingReasoning); text != "" {
+					msg["reasoning_content"] = text
+				}
+				pendingReasoning = nil
+			}
 			flushPendingCalls := func() {
 				if len(pendingCalls) == 0 {
 					return
 				}
-				messages = append(messages, map[string]interface{}{
+				msg := map[string]interface{}{
 					"role":       "assistant",
 					"tool_calls": pendingCalls,
-				})
+				}
+				attachReasoning(msg)
+				messages = append(messages, msg)
 				pendingCalls = nil
 			}
 			for _, item := range inputValue.Array() {
@@ -105,9 +123,10 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 					})
 					continue
 				}
-				// reasoning 无 chat 对应物，跳过且不拆散相邻调用组
-				//（codex 会在同一轮的并行调用之间插入 reasoning item）。
 				if itemType == "reasoning" {
+					if text := reasoningTextFromItem(item); text != "" {
+						pendingReasoning = append(pendingReasoning, text)
+					}
 					continue
 				}
 				flushPendingCalls()
@@ -116,6 +135,13 @@ func ConvertResponsesRequestToChat(body []byte) ([]byte, error) {
 					return nil, err
 				}
 				if msg != nil {
+					// 无调用组可挂时，reasoning 归属于紧随的 assistant 文本消息；
+					// 跟随 user/system/tool 轮则属无主流失，丢弃不污染。
+					if msg["role"] == "assistant" {
+						attachReasoning(msg)
+					} else {
+						pendingReasoning = nil
+					}
 					messages = append(messages, msg)
 				}
 			}
@@ -265,8 +291,8 @@ func responsesInputItemToChatMessage(item gjson.Result) (map[string]interface{},
 		}, nil
 
 	case "reasoning":
-		// chat 协议没有推理 item 的对应物；无状态模式下 codex 的下一轮输入不
-		// 依赖它，安全丢弃。
+		// 请求向主循环已把 reasoning 回填到所属 assistant 轮次；此处仅作防御
+		// 兜底（直调本函数的路径），保持丢弃语义。
 		return nil, nil
 
 	case "item_reference":
@@ -276,6 +302,30 @@ func responsesInputItemToChatMessage(item gjson.Result) (map[string]interface{},
 		log.Debugf("[Responses→Chat] drop unknown input item type: %s", item.Get("type").String())
 		return nil, nil
 	}
+}
+
+// reasoningTextFromItem 提取 Responses reasoning item 携带的思考文本。优先
+// summary[]（codex 回放的标准形态，summary_text part），兼容 content[]（部分
+// 客户端以 reasoning_text part 形态回传原文）。
+func reasoningTextFromItem(item gjson.Result) string {
+	var parts []string
+	for _, group := range []gjson.Result{item.Get("summary"), item.Get("content")} {
+		if !group.Exists() || !group.IsArray() {
+			continue
+		}
+		for _, part := range group.Array() {
+			if text := part.Get("text").String(); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// joinReasoningText 把同一 assistant 轮次缓冲到的多段思考文本合并为单个
+// reasoning_content（并行调用被 reasoning item 分隔时会产生多段）。
+func joinReasoningText(parts []string) string {
+	return strings.Join(parts, "\n\n")
 }
 
 // responsesContentToChat 把 Responses message content（string 或 content part
@@ -364,6 +414,20 @@ type responsesFunctionCallItem struct {
 	Arguments string `json:"arguments"`
 }
 
+// responsesReasoningItem 承载 chat 上游回吐的思考内容（reasoning_content），
+// 以 OpenAI Responses 标准 reasoning item 形态交给 codex 存档；codex 会在
+// 后续轮次原样回放，请求向再降维回 assistant.reasoning_content（OPE-9733）。
+type responsesReasoningItem struct {
+	Id      string                      `json:"id"`
+	Type    string                      `json:"type"`
+	Summary []responsesReasoningSummary `json:"summary"`
+}
+
+type responsesReasoningSummary struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 type responsesResponseBody struct {
 	Id                 string          `json:"id"`
 	Object             string          `json:"object"`
@@ -441,6 +505,15 @@ type ChatToResponsesStreamConverter struct {
 		id     string
 		text   strings.Builder
 	}
+
+	reasoning struct {
+		opened bool
+		closed bool
+		id     string
+		text   strings.Builder
+	}
+	reasoningSlot    int
+	reasoningSlotted bool
 
 	toolCalls   map[string]*streamToolCallState
 	nextItemNum int
@@ -565,10 +638,18 @@ func (c *ChatToResponsesStreamConverter) consumeChatChunk(chat *chatCompletionRe
 				})
 			}
 		}
-		if text := deltaReasoningText(delta); text != "" {
-			// chat 上游的推理增量（reasoning_content）无 Responses 有状态对应物，
-			// 丢弃；usage 中的 reasoning_tokens 仍会计入。
-			log.Debugf("[Chat→Responses] drop reasoning delta (%d bytes)", len(text))
+		if text := chatMessageReasoningText(delta); text != "" {
+			// 思考增量升维成 Responses reasoning item（summary_text 形态）交给
+			// codex 存档回放——thinking 上游要求多轮回传 reasoning_content，
+			// 丢弃会导致下一轮必 400（OPE-9733）。
+			c.ensureReasoningOpened(out)
+			c.reasoning.text.WriteString(text)
+			c.writeEvent(out, "response.reasoning_summary_text.delta", map[string]interface{}{
+				"item_id":       c.reasoning.id,
+				"output_index":  c.reasoningSlot,
+				"summary_index": 0,
+				"delta":         text,
+			})
 		}
 		for i := range delta.ToolCalls {
 			c.consumeToolCallDelta(&delta.ToolCalls[i], out)
@@ -618,6 +699,51 @@ func (c *ChatToResponsesStreamConverter) consumeToolCallDelta(tc *toolCall, out 
 			"delta":        tc.Function.Arguments,
 		})
 	}
+}
+
+func (c *ChatToResponsesStreamConverter) ensureReasoningOpened(out *strings.Builder) {
+	if c.reasoning.opened {
+		return
+	}
+	if !c.reasoningSlotted {
+		c.reasoningSlot = c.nextSlot()
+		c.reasoningSlotted = true
+	}
+	c.reasoning.opened = true
+	c.reasoning.id = fmt.Sprintf("rs-%s", c.sanitizeID(c.responseID))
+	c.writeEvent(out, "response.output_item.added", map[string]interface{}{
+		"output_index": c.reasoningSlot,
+		"item": map[string]interface{}{
+			"id":      c.reasoning.id,
+			"type":    "reasoning",
+			"summary": []interface{}{},
+			"content": []interface{}{},
+		},
+	})
+	c.writeEvent(out, "response.reasoning_summary_part.added", map[string]interface{}{
+		"item_id":       c.reasoning.id,
+		"output_index":  c.reasoningSlot,
+		"summary_index": 0,
+		"part": map[string]interface{}{
+			"type": "summary_text",
+			"text": "",
+		},
+	})
+}
+
+func (c *ChatToResponsesStreamConverter) closeReasoning(out *strings.Builder) {
+	c.reasoning.closed = true
+	text := c.reasoning.text.String()
+	c.writeEvent(out, "response.reasoning_summary_text.done", map[string]interface{}{
+		"item_id":       c.reasoning.id,
+		"output_index":  c.reasoningSlot,
+		"summary_index": 0,
+		"text":          text,
+	})
+	c.writeEvent(out, "response.output_item.done", map[string]interface{}{
+		"output_index": c.reasoningSlot,
+		"item":         newReasoningItem(c.reasoning.id, text),
+	})
 }
 
 func (c *ChatToResponsesStreamConverter) ensureMessageOpened(out *strings.Builder) {
@@ -677,6 +803,9 @@ func (c *ChatToResponsesStreamConverter) emitCompleted(out *strings.Builder) {
 	c.completedSent = true
 
 	// 收尾所有未关闭 item（正常路径 finish_reason chunk 已收，这里兜底）。
+	if c.reasoning.opened && !c.reasoning.closed {
+		c.closeReasoning(out)
+	}
 	if c.message.opened && !c.message.closed {
 		c.closeMessage(out)
 	}
@@ -749,7 +878,10 @@ func (c *ChatToResponsesStreamConverter) closeToolCall(out *strings.Builder, sta
 }
 
 func (c *ChatToResponsesStreamConverter) buildFinalOutput() []interface{} {
-	output := make([]interface{}, 0, len(c.toolCalls)+1)
+	output := make([]interface{}, 0, len(c.toolCalls)+2)
+	if c.reasoning.opened {
+		output = append(output, newReasoningItem(c.reasoning.id, c.reasoning.text.String()))
+	}
 	if c.message.opened && c.message.text.String() != "" {
 		output = append(output, responsesMessageItem{
 			Id:     c.message.id,
@@ -868,8 +1000,13 @@ func applyFinishStatus(resp *responsesResponseBody, finishReason string) {
 }
 
 func chatChoiceToResponsesOutput(choice *chatCompletionChoice) []interface{} {
-	output := make([]interface{}, 0, 2)
+	output := make([]interface{}, 0, 3)
 	if choice.Message != nil {
+		// 思考内容放在 output 首位：与上游生成顺序一致（先思考后输出），
+		// codex 回放时请求向据此归位到同一 assistant 轮次。
+		if text := chatMessageReasoningText(choice.Message); text != "" {
+			output = append(output, newReasoningItem("rs-0", text))
+		}
 		if text := contentToString(choice.Message.Content); text != "" {
 			output = append(output, responsesMessageItem{
 				Id:     "msg-0",
@@ -897,6 +1034,16 @@ func chatChoiceToResponsesOutput(choice *chatCompletionChoice) []interface{} {
 	return output
 }
 
+// newReasoningItem 构造带单段 summary_text 的标准 reasoning item。id 需与
+// 同一响应里已发出的 added 事件保持一致（codex 按 id 归档 item）。
+func newReasoningItem(id, text string) responsesReasoningItem {
+	return responsesReasoningItem{
+		Id:      id,
+		Type:    "reasoning",
+		Summary: []responsesReasoningSummary{{Type: "summary_text", Text: text}},
+	}
+}
+
 func contentToString(content any) string {
 	switch v := content.(type) {
 	case string:
@@ -916,11 +1063,13 @@ func contentToString(content any) string {
 	}
 }
 
-func deltaReasoningText(delta *chatMessage) string {
-	if delta.ReasoningContent != "" {
-		return delta.ReasoningContent
+// chatMessageReasoningText 取 chat 消息/增量里的思考文本，兼容
+// reasoning_content（DeepSeek/Qwen 系）与 reasoning 两种字段形态。
+func chatMessageReasoningText(m *chatMessage) string {
+	if m.ReasoningContent != "" {
+		return m.ReasoningContent
 	}
-	return delta.Reasoning
+	return m.Reasoning
 }
 
 func derefString(s *string) string {

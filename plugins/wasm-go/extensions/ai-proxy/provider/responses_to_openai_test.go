@@ -621,3 +621,213 @@ func TestConvertResponsesRequestToChat_InterleavedCallOutputPairsStaysValid(t *t
 		t.Errorf("pair grouping wrong: %s", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// OPE-9733：reasoning 双向回传（请求向回填 + 响应向升维）
+// ---------------------------------------------------------------------------
+
+func TestConvertResponsesRequestToChat_ReasoningRoundTrip(t *testing.T) {
+	// 真实 codex 回放形态：reasoning item 紧跟在所属 assistant 轮次之前，
+	// 且可能插在一轮并行调用的两个 function_call 之间。
+	body := `{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"先列目录再读文件"}]},
+			{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}","call_id":"call_1"},
+			{"type":"function_call_output","call_id":"call_1","output":"file_a"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"再看看内容"}]},
+			{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"cat a\"}","call_id":"call_2"},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"并行读两个文件"}]},
+			{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"cat b\"}","call_id":"call_3"},
+			{"type":"function_call_output","call_id":"call_2","output":"A"},
+			{"type":"function_call_output","call_id":"call_3","output":"B"},
+			{"type":"reasoning","content":[{"type":"reasoning_text","text":"总结一下"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+		],
+		"store": false
+	}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs := gjson.ParseBytes(out).Get("messages").Array()
+	// user / assistant(tc1+reasoning) / tool / user / assistant(tc2+tc3+reasoning) / tool / tool / assistant(text+reasoning)
+	if len(msgs) != 8 {
+		t.Fatalf("messages len = %d, want 8: %s", len(msgs), out)
+	}
+	if msgs[1].Get("role").String() != "assistant" ||
+		msgs[1].Get("reasoning_content").String() != "先列目录再读文件" {
+		t.Errorf("msg1 (tool_calls turn) reasoning wrong: %v", msgs[1])
+	}
+	if msgs[1].Get("tool_calls.0.id").String() != "call_1" {
+		t.Errorf("msg1 tool_calls wrong: %v", msgs[1].Get("tool_calls"))
+	}
+	// 被 reasoning 隔断的并行调用必须仍合并为一条 assistant 多 tool_calls
+	if n := len(msgs[4].Get("tool_calls").Array()); n != 2 {
+		t.Fatalf("msg4 tool_calls len = %d, want 2 (parallel merge must survive reasoning)", n)
+	}
+	if msgs[4].Get("reasoning_content").String() != "并行读两个文件" {
+		t.Errorf("msg4 reasoning wrong: %v", msgs[4].Get("reasoning_content"))
+	}
+	// content[] 形态（reasoning_text part）也要能取到
+	if msgs[7].Get("reasoning_content").String() != "总结一下" {
+		t.Errorf("msg7 (assistant text) reasoning wrong: %v", msgs[7].Get("reasoning_content"))
+	}
+	if msgs[7].Get("role").String() != "assistant" {
+		t.Errorf("msg7 role = %v", msgs[7].Get("role"))
+	}
+	// tool / user 消息不得被污染
+	for _, i := range []int{2, 3, 5, 6} {
+		if msgs[i].Get("reasoning_content").Exists() {
+			t.Errorf("msg%d must not carry reasoning_content", i)
+		}
+	}
+}
+
+func TestConvertResponsesRequestToChat_ReasoningOrphanDropped(t *testing.T) {
+	// reasoning 后面跟的是 user 轮（无 assistant 可归属）→ 静默丢弃。
+	body := `{"model":"m","input":[
+		{"type":"message","role":"user","content":"q1"},
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"孤儿思考"}]},
+		{"type":"message","role":"user","content":"q2"}
+	]}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs := gjson.ParseBytes(out).Get("messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(msgs))
+	}
+	for i, m := range msgs {
+		if m.Get("reasoning_content").Exists() {
+			t.Errorf("msg%d must not carry reasoning_content: %v", i, m)
+		}
+	}
+}
+
+func TestConvertResponsesRequestToChat_ReasoningEmptySummaryNoField(t *testing.T) {
+	// 既有形态回归：空 summary 的 reasoning item 不应给 assistant 消息凭空
+	// 加 reasoning_content 键（保持消息形状与历史行为一致）。
+	body := `{"model":"m","input":[
+		{"type":"message","role":"user","content":"q"},
+		{"type":"reasoning","summary":[]},
+		{"type":"function_call","name":"shell","arguments":"{}","call_id":"c1"},
+		{"type":"function_call_output","call_id":"c1","output":"ok"}
+	]}`
+	out, err := ConvertResponsesRequestToChat([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msgs := gjson.ParseBytes(out).Get("messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("messages len = %d, want 3", len(msgs))
+	}
+	if msgs[1].Get("reasoning_content").Exists() {
+		t.Errorf("empty summary must not produce reasoning_content: %v", msgs[1])
+	}
+}
+
+func TestConvertChatResponseToResponses_ReasoningItem(t *testing.T) {
+	body := `{
+		"id": "chatcmpl-r",
+		"created": 1,
+		"model": "deepseek-v4-flash",
+		"choices": [{"index":0,"message":{
+			"role":"assistant",
+			"reasoning_content":"需要先列目录",
+			"content":"已完成",
+			"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]
+		},"finish_reason":"stop"}],
+		"usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}
+	}`
+	out, err := ConvertChatResponseToResponses([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := gjson.ParseBytes(out)
+	items := g.Get("output").Array()
+	if len(items) != 3 {
+		t.Fatalf("output len = %d, want 3 (reasoning + message + function_call): %s", len(items), out)
+	}
+	r := items[0]
+	if r.Get("type").String() != "reasoning" {
+		t.Fatalf("output.0 type = %v, want reasoning", r.Get("type"))
+	}
+	if r.Get("summary.0.type").String() != "summary_text" || r.Get("summary.0.text").String() != "需要先列目录" {
+		t.Errorf("reasoning summary wrong: %v", r.Get("summary"))
+	}
+	if items[1].Get("type").String() != "message" || items[1].Get("content.0.text").String() != "已完成" {
+		t.Errorf("output.1 message wrong: %v", items[1])
+	}
+	if items[2].Get("type").String() != "function_call" {
+		t.Errorf("output.2 type = %v", items[2].Get("type"))
+	}
+}
+
+func TestStreamConversion_ReasoningEvents(t *testing.T) {
+	chunks := []string{
+		"data: {\"id\":\"chatcmpl-1\",\"created\":1789441920,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"先\"},\"finish_reason\":null}]}\n\n",
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"思考\"},\"finish_reason\":null}]}\n\n",
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"答\"},\"finish_reason\":null}]}\n\n",
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		"data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":3,\"total_tokens\":9}}\n\n",
+		"data: [DONE]\n\n",
+	}
+	events := feedChunks(t, chunks)
+
+	// 思考增量必须以 summary_text delta 形式透传给 codex
+	var reasoningDeltas []string
+	for _, e := range events {
+		if e.Get("type").String() == "response.reasoning_summary_text.delta" {
+			reasoningDeltas = append(reasoningDeltas, e.Get("delta").String())
+		}
+	}
+	if strings.Join(reasoningDeltas, "") != "先思考" {
+		t.Fatalf("reasoning deltas = %v, want 先思考", reasoningDeltas)
+	}
+
+	// 事件序：reasoning item 先于 message item 打开
+	openItems := map[string]string{} // item type -> item id
+	for _, e := range events {
+		if e.Get("type").String() == "response.output_item.added" {
+			openItems[e.Get("item.type").String()] = e.Get("item.id").String()
+		}
+	}
+	if _, ok := openItems["reasoning"]; !ok {
+		t.Fatalf("missing reasoning output_item.added: %v", eventTypes(events))
+	}
+
+	// 收尾：summary done + output_item.done 全量文本
+	var doneText string
+	var doneItem gjson.Result
+	for _, e := range events {
+		if e.Get("type").String() == "response.reasoning_summary_text.done" {
+			doneText = e.Get("text").String()
+		}
+		if e.Get("type").String() == "response.output_item.done" && e.Get("item.type").String() == "reasoning" {
+			doneItem = e.Get("item")
+		}
+	}
+	if doneText != "先思考" {
+		t.Errorf("reasoning summary done text = %q", doneText)
+	}
+	if doneItem.Get("id").String() == "" || doneItem.Get("summary.0.text").String() != "先思考" {
+		t.Errorf("reasoning output_item.done wrong: %v", doneItem)
+	}
+
+	// completed 的 output 首位是 reasoning item，随后才是 message
+	completed := events[len(events)-1]
+	out0 := completed.Get("response.output.0")
+	if out0.Get("type").String() != "reasoning" || out0.Get("summary.0.text").String() != "先思考" {
+		t.Errorf("completed output.0 wrong: %v", out0)
+	}
+	if completed.Get("response.output.1.type").String() != "message" {
+		t.Errorf("completed output.1 should be message: %v", completed.Get("response.output"))
+	}
+	// added 与 done 的 item id 一致（codex 按 id 归档）
+	if openItems["reasoning"] != doneItem.Get("id").String() {
+		t.Errorf("reasoning id mismatch: added=%s done=%s", openItems["reasoning"], doneItem.Get("id"))
+	}
+}
