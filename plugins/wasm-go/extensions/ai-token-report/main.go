@@ -35,6 +35,7 @@ const (
 	CtxTokenUsage      = "token_usage_raw"
 	CtxAccumulatedBody = "accumulated_body"
 	CtxSkipPlugin      = "skip_token_report"
+	CtxProductSource   = "token_report_product_source"
 	providerTypeKey    = "providerType"
 
 	// HTTP headers
@@ -53,17 +54,18 @@ const (
 
 // TokenUsageReportRequest represents the request body for token usage reporting
 type TokenUsageReportRequest struct {
-	RequestId   string `json:"requestId"`
-	Model       string `json:"model"`
-	UserKey     string `json:"userKey"`
-	InputToken  int64  `json:"inputToken"`
-	OutputToken int64  `json:"outputToken"`
-	TotalToken  int64  `json:"totalToken"`
-	Duration    int64  `json:"duration"`
-	Timestamp   int64  `json:"timestamp"`
-	StartTime   int64  `json:"startTime"`
-	EndTime     int64  `json:"endTime"`
-	TokenUsage  string `json:"tokenUsage"`
+	ProductSource string `json:"productSource"`
+	RequestId     string `json:"requestId"`
+	Model         string `json:"model"`
+	UserKey       string `json:"userKey"`
+	InputToken    int64  `json:"inputToken"`
+	OutputToken   int64  `json:"outputToken"`
+	TotalToken    int64  `json:"totalToken"`
+	Duration      int64  `json:"duration"`
+	Timestamp     int64  `json:"timestamp"`
+	StartTime     int64  `json:"startTime"`
+	EndTime       int64  `json:"endTime"`
+	TokenUsage    string `json:"tokenUsage"`
 	// Wujie business task id (OPE-8474), plain numeric string read from wujie_task_id header.
 	// omitempty: header absent/empty -> field not sent (Onepiece falls back to requestId dedup).
 	TaskId string `json:"taskId,omitempty"`
@@ -76,6 +78,7 @@ type TokenUsageReportConfig struct {
 	reportServiceName  string
 	reportTimeout      int32
 	disableOpenaiUsage bool
+	source             sourceConfig
 }
 
 func main() {}
@@ -97,6 +100,11 @@ func parseConfig(json gjson.Result, config *TokenUsageReportConfig) error {
 	if config.reportApiUrl == "" {
 		log.Infof("ai-token-report: reportApiUrl not configured, plugin will be disabled")
 		return nil
+	}
+	var err error
+	config.source, err = parseSourceConfig(json.Get("source"))
+	if err != nil {
+		return fmt.Errorf("source: %w", err)
 	}
 
 	// Parse reportServiceName (optional)
@@ -173,6 +181,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	if config.reportApiUrl == "" {
 		return types.ActionContinue
 	}
+	// Snapshot attribution before later request rewrites. Async reporting consumes
+	// this request context, never the (possibly modified) source header.
+	source, _ := proxywasm.GetHttpRequestHeader(config.source.headerName)
+	ctx.SetContext(CtxProductSource, config.source.normalize(source))
 
 	// 检查 providerType，如果为空则跳过本插件（非 AI 路由）
 	providerType := getProviderType()
@@ -557,18 +569,19 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 
 	// Build request body
 	reportReq := TokenUsageReportRequest{
-		RequestId:   requestID,
-		Model:       model,
-		UserKey:     userKey,
-		InputToken:  int64(inputTokens),
-		OutputToken: int64(outputTokens),
-		TotalToken:  int64(totalTokens),
-		Duration:    duration,
-		Timestamp:   timestamp,
-		StartTime:   startTime,
-		EndTime:     endTime,
-		TokenUsage:  tokenUsage,
-		TaskId:      taskId,
+		ProductSource: ctx.GetStringContext(CtxProductSource, config.source.fallbackValue),
+		RequestId:     requestID,
+		Model:         model,
+		UserKey:       userKey,
+		InputToken:    int64(inputTokens),
+		OutputToken:   int64(outputTokens),
+		TotalToken:    int64(totalTokens),
+		Duration:      duration,
+		Timestamp:     timestamp,
+		StartTime:     startTime,
+		EndTime:       endTime,
+		TokenUsage:    tokenUsage,
+		TaskId:        taskId,
 	}
 
 	// Marshal request body
