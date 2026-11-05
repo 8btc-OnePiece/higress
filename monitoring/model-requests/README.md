@@ -1,6 +1,6 @@
 # 模型请求小时监控（OPE-11003）
 
-数据链路为 `ai-route-monitor → Envoy 宿主 Counter → 每 Pod /stats/prometheus → Prometheus → Grafana`。不逐请求 HTTP 上报数据库或 Grafana。已在远程 Mac 的真实 Higress 2.1.9 容器验证终态、来源报告、实际导出和 Prometheus 查询，证据见 [VALIDATION](VALIDATION.md)。尚未部署到实际集群或导入 Grafana。
+数据链路为 `ai-route-monitor → Envoy 宿主 Counter → 每 Pod /stats/prometheus → Prometheus → Grafana`。不逐请求 HTTP 上报数据库或 Grafana。已在远程 Mac 的真实 Higress 2.1.9 容器验证终态、来源报告、实际导出和 Prometheus 查询，证据见 [VALIDATION](VALIDATION.md)。2026-11-05 已补充隔离 Grafana 导入、真实登录和浏览器渲染验证，见 [报告](grafana-validation/README.md)。尚未部署到实际集群。
 
 ## 指标契约
 
@@ -37,7 +37,7 @@ wujie_model_submissions_total{source="wujieai",model="gpt-4",outcome="success"}
 3. 保留现有 stats inclusion 配置；本 chart 默认 `global.proxy.proxyStatsMatcher.inclusionRegexps=[".*"]`。若现场限制 stats，按原规则**追加** `.*wujie_model_(requests|submissions)_total.*`，不要替换其他指标。实际宿主是否创建/暴露新指标须验证。
 4. 确认网关 Pod 的 15020 端口名（chart 为 `istio-prom`）和 Prometheus Operator selector。使用 chart 自带 PodMonitor + overlay，或独立 [网关 PodMonitor](../higress-gateway-podmonitor.yaml)，**不要同时部署两个采集同一 Pod 的 Monitor**。all-in-one 示例使用每 Pod 的 targetPort 15020（需已声明 containerPort），不再把目标替换为负载均衡 Service，也不覆盖 instance。三个旧 all-in-one 文件是同一资源的替代示例，只选一个。
 5. 先部署 bootstrap/采集配置并检查启动与旧指标，再灰度启用插件 `terminalMetrics`。无来源 Header 的请求仍进入 unknown，不被拒绝。请求在更早的过滤器被拒绝、未执行 monitor decode headers 时不在覆盖范围；`AUTHN/priority=100` 沿用原插件，无法单凭元数据保证它早于所有鉴权/限流插件。必须查看实际 filter chain 和拒绝测试。
-6. 把 [dashboard.json](dashboard.json) 导入 Grafana，选择 `DS_PROMETHEUS` 数据源。UID `wujie-model-requests`，默认 `source=wujieai`。管理端可配置 URL：`https://GRAFANA_HOST/d/wujie-model-requests?var-source=wujieai&from=now-24h%2Fh&to=now%2Fh&timezone=Asia%2FShanghai`。仅配置已有授权可访问的 URL，不提供公开匿名访问或嵌入绕过登录。
+6. 把 [dashboard.json](dashboard.json) 导入 Grafana，选择 `DS_PROMETHEUS` 数据源。UID `wujie-model-requests`，默认 `source=wujieai`。管理端可配置 URL：`https://GRAFANA_HOST/d/wujie-model-requests?var-source=wujieai&from=now-23h%2Fh&to=now%2Fh-1h%2B1s&timezone=Asia%2FShanghai`。仅配置已有授权可访问的 URL，不提供公开匿名访问或嵌入绕过登录。
 
 以上均为操作说明；本任务未执行 helm upgrade、kubectl apply、重启或上线。
 
@@ -57,7 +57,9 @@ sum(increase(wujie_model_requests_total{source="wujieai"}[1h]))
 / (sum(increase(wujie_model_requests_total{source="wujieai"}[1h])) > 0)
 ```
 
-看板还包含分模型成功率/调用量、失败分类、unknown 占比及独立异步提交。默认范围 `now-24h/h → now/h`，timezone `Asia/Shanghai`，查询步长 1h；点 T 表示刚结束的 `(T-1h,T]` 小时。手动选择时间时保留整点；Grafana 在超长范围可能自动扩大步长，建议小时看板限制在 30 天内。
+看板还包含分模型成功率/调用量、失败分类、unknown 占比及独立异步提交。默认范围 `now-23h/h → now/h-1h+1s`，timezone `Asia/Shanghai`，查询步长 1h；点 T 表示刚结束的 `(T-1h,T]` 小时。手动选择时间时保留整点；Grafana 在超长范围可能自动扩大步长，建议小时看板限制在 30 天内。
+
+Grafana 11.3 对结束参数 `/h` 按小时末包容解析。旧范围 `now-24h/h → now/h` 实测产生 **25** 个小时桶，最后点为当前小时起点 H（并未纳入当前未完成小时），多的是左端前一小时窗口。新范围配合固定 1h step，返回恰好 H-23h 至 H 的 **24** 个端点，覆盖 `(H-24h,H]`；`to` 的实际原始边界为 H+999ms，查询最后点仍是 H。`+1s` 防止结束边界退到 H-1ms 后漏掉最近完成小时。管理端 URL 中 `+` 必须编码为 `%2B`，或省略 from/to 使用看板默认值。
 
 Prometheus `increase` 是采样外推，可能产生小数；新序列首次采集之前的增量、短命 Pod 未被采集的请求无法恢复。它不是逐笔账本。上线先确保抓取正常并预热观察至少两次采集，不能以这些图对账扣费或承诺精确逐次总数。
 

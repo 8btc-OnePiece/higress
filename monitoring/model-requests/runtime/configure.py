@@ -37,7 +37,7 @@ config.update({
         "name": "fixture", "address": {"socket_address": {"address": "0.0.0.0", "port_value": 8080}},
         "filter_chains": [{"filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": {
             "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-            "stat_prefix": "fixture", "stream_idle_timeout": "3s", "route_config": {"name": "fixture", "virtual_hosts": [{"name": "fixture", "domains": ["*"], "routes": [{"name": "generation", "match": {"prefix": "/"}, "route": {"cluster": "model", "timeout": "0.3s", "retry_policy": {"retry_on": "5xx", "num_retries": 1}}}]}]},
+            "stat_prefix": "fixture", "stream_idle_timeout": "3s", "route_config": {"name": "fixture", "virtual_hosts": [{"name": "fixture", "domains": ["*"], "routes": [{"name": "disconnect-fixture", "match": {"path": "/v1/disconnect/chat/completions"}, "route": {"cluster": "model", "timeout": "3s"}}, {"name": "generation", "match": {"prefix": "/"}, "route": {"cluster": "model", "timeout": "0.3s", "retry_policy": {"retry_on": "5xx", "num_retries": 1}}}]}]},
             "http_filters": filters}}]}]}]}})
 (root / "envoy.json").write_text(json.dumps(config, indent=2))
 

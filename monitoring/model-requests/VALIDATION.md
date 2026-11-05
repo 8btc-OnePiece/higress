@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-11-04（Asia/Shanghai）。OPE-11003 / 父任务 OPE-9626。工作目录 `/private/tmp/ope-9626-higress`，分支 `codex/ope-9626-product-analytics`，基线 `986ee824`。所有修改留在该 worktree；完成验证后按授权本地提交，实际 commit 见任务记录。未推送、部署或发布产物。
+初轮日期：2026-11-04（Asia/Shanghai）；2026-11-05 浏览器补验见文末。OPE-11003 / 父任务 OPE-9626。工作目录 `/private/tmp/ope-9626-higress`，分支 `codex/ope-9626-product-analytics`，基线 `986ee824`。所有修改留在该 worktree；完成验证后按授权本地提交，实际 commit 见任务记录。未推送、部署或发布产物。
 
 追加授权：补同仓库 ai-token-report 最小来源生产端，并允许完成验证后本地提交。容器运行测试按用户最新要求仅在 Mac 打包机、共享时段串行执行，不在本机测试容器。
 
@@ -43,7 +43,7 @@
 
 - 本机没有创建或启动测试容器；此前中止的本机镜像拉取可能留有缓存层，见共享 `higress-local-runtime.json`。
 - 未检查实际部署 filter chain；已证明仅请求头回调执行后的拒绝可观察。未验证其他提供方或转换器组合。
-- 未验证 pilot-agent 15020 合并、Kubernetes PodMonitor Operator 发现、真实多 Pod 重启、Grafana 导入/显示。fixture 通过不代表这些现场步骤完成。
+- 未验证 pilot-agent 15020 合并、Kubernetes PodMonitor Operator 发现、真实多 Pod 重启、正式 Grafana 环境的接入。隔离 Grafana 导入/显示已在 2026-11-05 补验通过。fixture 通过不代表这些现场步骤完成。
 - 未进行容量、启动、p99/首 token 延迟测试；未与实际客户端、任务服务及账务接收端/Kafka/数据库运行联调。最终异步结果来自 appserver 持久化小时快照 API，没有 `wujie_model_tasks_total`。
 
 ## 行为与发布影响
@@ -55,3 +55,7 @@
 - ai-token-report 新增 camelCase `productSource`，旧配置仍有效并输出 unknown；启用配置后输出有限归一化来源。旧计费字段、金额、上报次数时机和超时重试不改。接收端字段与账务来源迁移需先按其正常流程发布；两个插件的 source 配置需一致。
 
 OPE-11003 保持 `in_progress`，本地开发及上述隔离运行验证完成；未将发布现场验收标为完成。完整灰度、采集检查和回滚步骤见 [README](README.md)。
+
+## 2026-11-05 Grafana 真实浏览器补验
+
+远程同一打包机完成真实 Grafana11.3 导入、数据源映射和 Native Chrome156 登录/查询/截图。50 项浏览器断言、8 次实时网关探测、7 条 Prometheus 查询、3 次定向断连均通过；完整画面已人工视觉核对。发现并修复默认范围包容左端导致25个桶的问题，最终恰好24个已完成小时，未漏掉最新完成小时。监控插件生产代码不变。初轮失败、截图捕获修正、历史fixture与实时链路的边界和资源清理详见 [补验报告](grafana-validation/README.md)。

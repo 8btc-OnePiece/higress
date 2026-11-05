@@ -26,8 +26,8 @@
   "timezone": "Asia/Shanghai",
   "refresh": "1m",
   "time": {
-    "from": "now-24h/h",
-    "to": "now/h"
+    "from": "now-23h/h",
+    "to": "now/h-1h+1s"
   },
   "timepicker": {
     "refresh_intervals": [
