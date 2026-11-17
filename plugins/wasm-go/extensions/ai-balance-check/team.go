@@ -101,13 +101,13 @@ func teamAdmissionError(status int) types.Action {
 	case http.StatusForbidden:
 		code = "team_access_denied"
 		message = "当前账户无法在此团队发起任务"
-		status = http.StatusConflict
+		status = http.StatusUnprocessableEntity
 	case http.StatusPaymentRequired:
 		// These are request-level denials. API clients treat 402/403 as
 		// failures of the shared upstream credentials.
 		code = "team_credits_unavailable"
 		message = "当前团队积分不足，请切换团队或补充积分"
-		status = http.StatusConflict
+		status = http.StatusUnprocessableEntity
 	default:
 		status = http.StatusServiceUnavailable
 		code = "team_billing_unavailable"
