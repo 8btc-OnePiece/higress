@@ -21,8 +21,8 @@ func TestTeamAdmission(t *testing.T) {
 			wantCode  string
 		}{
 			{"accepted", "200", `{"teamId":"42"}`, 0, ""},
-			{"not a member", "403", "", 422, "team_access_denied"},
-			{"negative balance", "402", "", 422, "team_credits_unavailable"},
+			{"not a member", "403", "", 409, "team_access_denied"},
+			{"negative balance", "402", "", 409, "team_credits_unavailable"},
 			{"missing internal id", "200", "{}", 503, "team_billing_unavailable"},
 			{"upstream failure", "500", "", 503, "team_billing_unavailable"},
 		} {
