@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -17,12 +18,13 @@ func TestTeamAdmission(t *testing.T) {
 			upstream  string
 			body      string
 			wantError uint32
+			wantCode  string
 		}{
-			{"accepted", "200", `{"teamId":"42"}`, 0},
-			{"not a member", "403", "", 403},
-			{"negative balance", "402", "", 402},
-			{"missing internal id", "200", "{}", 503},
-			{"upstream failure", "500", "", 503},
+			{"accepted", "200", `{"teamId":"42"}`, 0, ""},
+			{"not a member", "403", "", 422, "team_access_denied"},
+			{"negative balance", "402", "", 422, "team_credits_unavailable"},
+			{"missing internal id", "200", "{}", 503, "team_billing_unavailable"},
+			{"upstream failure", "500", "", 503, "team_billing_unavailable"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				host, status := test.NewTestHost(config)
@@ -51,6 +53,11 @@ func TestTeamAdmission(t *testing.T) {
 					}
 				} else if local == nil || local.StatusCode != tc.wantError {
 					t.Fatalf("expected status %d, got %+v", tc.wantError, local)
+				} else {
+					var response OpenAIError
+					if err := json.Unmarshal(local.Data, &response); err != nil || response.Error.Code != tc.wantCode {
+						t.Fatalf("expected error code %q, got %+v (%v)", tc.wantCode, response, err)
+					}
 				}
 				host.CompleteHttp()
 			})

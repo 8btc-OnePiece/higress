@@ -253,3 +253,7 @@ For mixed routes and their fallbacks, set the internal `teamReportService` on
 `ai-token-report` and leave `requireTeamId` disabled. Team admission errors
 return before upstream dispatch. Keep the legacy route configuration where
 team billing is disabled.
+
+On team-enabled routes, a team membership or credit denial is returned to the
+model client as HTTP 422 with `team_access_denied` or `team_credits_unavailable`.
+This keeps the shared model credential available when the user switches teams.

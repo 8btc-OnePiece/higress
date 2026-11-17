@@ -92,6 +92,7 @@ func teamAdmissionStatus() int {
 
 func teamAdmissionError(status int) types.Action {
 	var code string
+	message := http.StatusText(status)
 	switch status {
 	case http.StatusBadRequest:
 		code = "invalid_team"
@@ -99,14 +100,21 @@ func teamAdmissionError(status int) types.Action {
 		code = "authentication_required"
 	case http.StatusForbidden:
 		code = "team_access_denied"
+		message = "当前账户无法在此团队发起任务"
+		status = http.StatusUnprocessableEntity
 	case http.StatusPaymentRequired:
-		code = "insufficient_balance"
+		// These are request-level denials. API clients treat 402/403 as
+		// failures of the shared upstream credentials.
+		code = "team_credits_unavailable"
+		message = "当前团队积分不足，请切换团队或补充积分"
+		status = http.StatusUnprocessableEntity
 	default:
 		status = http.StatusServiceUnavailable
 		code = "team_billing_unavailable"
+		message = http.StatusText(status)
 	}
 	var response OpenAIError
-	response.Error.Message = http.StatusText(status)
+	response.Error.Message = message
 	response.Error.Type = code
 	response.Error.Code = code
 	body, _ := json.Marshal(response)
