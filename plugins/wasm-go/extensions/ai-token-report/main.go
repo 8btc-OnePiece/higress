@@ -40,6 +40,7 @@ const (
 
 	// HTTP headers
 	OriginalAPIKey = "X-Original-Api-Key"
+	teamUUIDHeader = "X-Wujie-Team-Id"
 
 	// WujieTaskID is the business task id header (OPE-8474): forwarded by wujie backend,
 	// a plain-numeric task id (e.g. "999"). Deliberately NOT x-request-id, which Envoy overwrites.
@@ -596,9 +597,13 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 				return
 			}
 		}
-	} else if config.requireTeamID {
-		log.Errorf("Team usage missing admission attribution, requestId=%s", requestID)
-		return
+	} else {
+		// Admission strips the selector after it has set the team ID. A
+		// selector left on a team route belongs to an unadmitted request.
+		_, selectorErr := proxywasm.GetHttpRequestHeader(teamUUIDHeader)
+		if config.requireTeamID || (config.teamReportCluster != nil && selectorErr == nil) {
+			return
+		}
 	}
 
 	// Build request body

@@ -30,13 +30,14 @@ func TestSourceConfig(t *testing.T) {
 func TestReportSourceSnapshot(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
 		for _, tc := range []struct {
-			name, sourceConfig, header, value, expected string
-			stream, teamRoute, hasAdmission, mixedRoute bool
+			name, sourceConfig, header, value, expected           string
+			stream, teamRoute, hasAdmission, mixedRoute, rejected bool
 		}{
 			{name: "team usage SSE", teamRoute: true, hasAdmission: true, expected: "unknown", stream: true},
 			{name: "team usage without admission", teamRoute: true, expected: "unknown"},
 			{name: "mixed route with team admission", mixedRoute: true, hasAdmission: true, expected: "unknown"},
 			{name: "mixed route with legacy usage", mixedRoute: true, expected: "unknown"},
+			{name: "mixed route rejects team without personal billing", mixedRoute: true, rejected: true},
 			{name: "old config remains valid", header: "x-wujie-source", value: "wujieai", expected: "unknown"},
 			{name: "configured source JSON", sourceConfig: `,"source":{"allowedValues":["wujieai"]}`, header: "x-wujie-source", value: "wujieai", expected: "wujieai"},
 			{name: "configured source SSE", sourceConfig: `,"source":{"allowedValues":["wujieai"]}`, header: "x-wujie-source", value: "wujieai", expected: "wujieai", stream: true},
@@ -64,6 +65,9 @@ func TestReportSourceSnapshot(t *testing.T) {
 					require.NoError(t, host.SetProperty([]string{"wasm.teamPersonalOwnerUid"}, []byte("17")))
 				}
 				headers := [][2]string{{":authority", "model.test"}, {":method", "POST"}, {":path", "/v1/chat/completions"}, {"x-original-api-key", "test-user-key"}, {"request-id", "business-request"}, {"x-request-id", "envoy-request"}, {"wujie_task_id", "999"}}
+				if tc.rejected {
+					headers = append(headers, [2]string{teamUUIDHeader, "9943d4d9-d20b-49db-809d-88586f950fc7"})
+				}
 				original := append(append([][2]string{}, headers...), [2]string{tc.header, tc.value})
 				require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, original, false))
 				// Later routing/provider/header plugins rewrite path/host and source.
@@ -77,7 +81,11 @@ func TestReportSourceSnapshot(t *testing.T) {
 				if tc.stream {
 					contentType = "text/event-stream"
 				}
-				host.CallOnResponseHeaders(id, [][2]string{{":status", "200"}, {"content-type", contentType}}, false)
+				responseStatus := "200"
+				if tc.rejected {
+					responseStatus = "403"
+				}
+				host.CallOnResponseHeaders(id, [][2]string{{":status", responseStatus}, {"content-type", contentType}}, false)
 				if tc.stream {
 					host.CallOnResponseBody(id, append(append([]byte("data: "), body...), []byte("\n\n")...), false)
 					require.Empty(t, host.GetCalloutAttributesFromContext(id), "must not report before original end-of-stream timing")
@@ -86,7 +94,7 @@ func TestReportSourceSnapshot(t *testing.T) {
 					host.CallOnResponseBody(id, body, true)
 				}
 				calls := host.GetCalloutAttributesFromContext(id)
-				if tc.teamRoute && !tc.hasAdmission {
+				if tc.rejected || (tc.teamRoute && !tc.hasAdmission) {
 					require.Empty(t, calls, "missing team attribution must never fall back to personal billing")
 					host.CompleteHttpContext(id)
 					return
