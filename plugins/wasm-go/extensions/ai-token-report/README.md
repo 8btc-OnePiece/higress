@@ -284,3 +284,18 @@ spec:
 如有问题，请提交 Issue 到 Higress 项目：
 - GitHub: https://github.com/alibaba/higress
 - 官方文档: https://higress.io/
+
+## Team attribution
+
+Register the Open Platform Kubernetes service DNS address on port 8080 in
+Higress service discovery. Set `teamReportService` to the resulting upstream
+name, such as `onepiece-open-platform-internal.dns`.
+On mixed routes leave `requireTeamId` disabled so requests without team
+admission continue using the existing usage report. The reporter serializes
+the validated `wasm.teamId` as a numeric `teamId` and sets `personalOwnerUid`
+from `wasm.teamPersonalOwnerUid` when it is available. It sends these reports
+straight to `/internal/model/usage/team-report` on that service, and records
+rejections by request ID and response status.
+On a route configured with `requireTeamId: true`, requests missing the
+admitted ID are omitted from reporting and logged by request ID.
+Legacy usage keeps the same JSON fields and endpoint.

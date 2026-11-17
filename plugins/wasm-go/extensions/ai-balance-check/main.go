@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultAPITimeout int32 = 5000
+	defaultAPITimeout int32  = 5000
 	OriginalAPIKey    string = "X-Original-Api-Key"
 )
 
@@ -34,11 +34,12 @@ type OpenAIError struct {
 
 type BalanceCheckConfig struct {
 	checkClient  wrapper.HttpClient
-	apiUrl      string
-	serviceName string
+	apiUrl       string
+	serviceName  string
 	apiTimeout   int32
 	failMessage  string
 	failCode     int32
+	teamEndpoint *url.URL
 }
 
 func main() {}
@@ -52,8 +53,12 @@ func init() {
 }
 
 func parseConfig(json gjson.Result, config *BalanceCheckConfig) error {
+	teamBilling := json.Get("teamBilling").Bool()
 	config.apiUrl = json.Get("apiUrl").String()
 	if config.apiUrl == "" {
+		if teamBilling {
+			return fmt.Errorf("the legacy apiUrl is required when team billing is enabled")
+		}
 		log.Infof("ai-balance-check: apiUrl not configured, plugin will be disabled")
 		return nil
 	}
@@ -99,6 +104,14 @@ func parseConfig(json gjson.Result, config *BalanceCheckConfig) error {
 		if p, err := strconv.Atoi(actualPort); err == nil {
 			port = int64(p)
 		}
+	}
+
+	if teamBilling {
+		endpoint, err := url.Parse(json.Get("teamApiUrl").String())
+		if err != nil || endpoint.Host != parsedUrl.Host || endpoint.Scheme != parsedUrl.Scheme || endpoint.Path == "" {
+			return fmt.Errorf("teamApiUrl must be an admission URL on the existing balance API origin")
+		}
+		config.teamEndpoint = endpoint
 	}
 
 	// Create HTTP client for balance check API
@@ -152,6 +165,18 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 	// Check if already validated to avoid duplicate checks
 	if ctx.GetContext(CtxKeyBalanceChecked) != nil {
 		return types.ActionContinue
+	}
+
+	if config.teamEndpoint != nil {
+		teamUUID, err := proxywasm.GetHttpRequestHeader(teamUUIDHeader)
+		switch err {
+		case nil:
+			return checkTeamAdmission(ctx, config, teamUUID)
+		case types.ErrorStatusNotFound:
+			// Clients without a selector keep the existing balance check and usage report.
+		default:
+			return teamAdmissionError(http.StatusServiceUnavailable)
+		}
 	}
 
 	// Get API key from X-Original-Api-Key header
