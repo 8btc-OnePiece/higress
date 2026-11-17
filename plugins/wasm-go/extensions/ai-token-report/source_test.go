@@ -31,8 +31,12 @@ func TestReportSourceSnapshot(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
 		for _, tc := range []struct {
 			name, sourceConfig, header, value, expected string
-			stream                                      bool
+			stream, teamRoute, hasAdmission, mixedRoute bool
 		}{
+			{name: "team usage SSE", teamRoute: true, hasAdmission: true, expected: "unknown", stream: true},
+			{name: "team usage without admission", teamRoute: true, expected: "unknown"},
+			{name: "mixed route with team admission", mixedRoute: true, hasAdmission: true, expected: "unknown"},
+			{name: "mixed route with legacy usage", mixedRoute: true, expected: "unknown"},
 			{name: "old config remains valid", header: "x-wujie-source", value: "wujieai", expected: "unknown"},
 			{name: "configured source JSON", sourceConfig: `,"source":{"allowedValues":["wujieai"]}`, header: "x-wujie-source", value: "wujieai", expected: "wujieai"},
 			{name: "configured source SSE", sourceConfig: `,"source":{"allowedValues":["wujieai"]}`, header: "x-wujie-source", value: "wujieai", expected: "wujieai", stream: true},
@@ -41,13 +45,24 @@ func TestReportSourceSnapshot(t *testing.T) {
 			{name: "custom contract", sourceConfig: `,"source":{"headerName":"X-Product","allowedValues":["desktop"],"fallbackValue":"other"}`, header: "x-product", value: "desktop", expected: "desktop", stream: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				config := json.RawMessage(`{"reportApiUrl":"https://billing.test/model/usage/report","reportServiceName":"billing"` + tc.sourceConfig + `}`)
-				host, status := test.NewTestHost(config)
+				config := `{"reportApiUrl":"https://billing.test/model/usage/report","reportServiceName":"billing"` + tc.sourceConfig
+				if tc.teamRoute {
+					config += `,"requireTeamId":true`
+				}
+				if tc.teamRoute || tc.mixedRoute {
+					config += `,"teamReportService":"onepiece-open-platform-internal.dns"`
+				}
+				hostConfig := json.RawMessage(config + `}`)
+				host, status := test.NewTestHost(hostConfig)
 				defer host.Reset()
 				require.Equal(t, types.OnPluginStartStatusOK, status)
 				require.NoError(t, host.SetProperty([]string{"wasm.providerType"}, []byte("openai")))
 				require.NoError(t, host.SetProperty([]string{"wasm.requestModel"}, []byte("gpt-4")))
 				id := host.InitializeHttpContext()
+				if tc.hasAdmission {
+					require.NoError(t, host.SetProperty([]string{"wasm.teamId"}, []byte("57")))
+					require.NoError(t, host.SetProperty([]string{"wasm.teamPersonalOwnerUid"}, []byte("17")))
+				}
 				headers := [][2]string{{":authority", "model.test"}, {":method", "POST"}, {":path", "/v1/chat/completions"}, {"x-original-api-key", "test-user-key"}, {"request-id", "business-request"}, {"x-request-id", "envoy-request"}, {"wujie_task_id", "999"}}
 				original := append(append([][2]string{}, headers...), [2]string{tc.header, tc.value})
 				require.Equal(t, types.ActionContinue, host.CallOnRequestHeaders(id, original, false))
@@ -71,6 +86,11 @@ func TestReportSourceSnapshot(t *testing.T) {
 					host.CallOnResponseBody(id, body, true)
 				}
 				calls := host.GetCalloutAttributesFromContext(id)
+				if tc.teamRoute && !tc.hasAdmission {
+					require.Empty(t, calls, "missing team attribution must never fall back to personal billing")
+					host.CompleteHttpContext(id)
+					return
+				}
 				require.Len(t, calls, 1)
 				var report map[string]any
 				require.NoError(t, json.Unmarshal(calls[0].Body, &report))
@@ -82,7 +102,12 @@ func TestReportSourceSnapshot(t *testing.T) {
 				require.Equal(t, float64(10), report["inputToken"])
 				require.Equal(t, float64(5), report["outputToken"])
 				require.Equal(t, float64(15), report["totalToken"])
-				require.Equal(t, "outbound|443||billing.dns", calls[0].Upstream)
+				if tc.hasAdmission {
+					require.Equal(t, "outbound|8080||onepiece-open-platform-internal.dns", calls[0].Upstream)
+					require.Contains(t, calls[0].Headers, [2]string{":path", "/internal/model/usage/team-report"})
+				} else {
+					require.Equal(t, "outbound|443||billing.dns", calls[0].Upstream)
+				}
 				for _, field := range []string{"duration", "timestamp", "startTime", "endTime"} {
 					require.IsType(t, float64(0), report[field])
 					delete(report, field)
@@ -92,7 +117,13 @@ func TestReportSourceSnapshot(t *testing.T) {
 				require.Equal(t, float64(10), usage["input_token"])
 				require.Equal(t, float64(5), usage["output_token"])
 				require.Equal(t, float64(15), usage["total_token"])
-				require.Len(t, report, 9, "only productSource is added to the existing report schema")
+				if tc.hasAdmission {
+					require.Equal(t, float64(57), report["teamId"])
+					require.Equal(t, float64(17), report["personalOwnerUid"])
+					delete(report, "teamId")
+					delete(report, "personalOwnerUid")
+				}
+				require.Len(t, report, 9, "legacy report shape is preserved")
 				// The serialized asynchronous callout survives stream cleanup.
 				host.CompleteHttpContext(id)
 				require.Equal(t, tc.expected, gjson.GetBytes(calls[0].Body, "productSource").String())

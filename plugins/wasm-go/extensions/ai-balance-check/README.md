@@ -231,3 +231,25 @@ Apache License 2.0
 ## Support
 
 For issues and questions, please refer to the Higress documentation and community support.
+
+## Team model routes
+
+Enable `teamBilling: true` on the selected existing model routes. Place the
+plugin after authentication and before model dispatch. Keep `apiUrl` and
+`serviceName` for the existing personal balance check. Set `teamApiUrl` to
+the RedLine team admission path on the same origin.
+The plugin sends the original user bearer credential and a JSON `teamUuid` via
+POST for requests that include `X-Wujie-Team-Id`. RedLine validates the API key
+and overwrites `uid`. Without the header, the plugin uses the existing GET
+balance check.
+A successful response has HTTP 200 and a decimal string `teamId`. The plugin
+stores this ID in `wasm.teamId`, stores an optional `personalOwnerUid` in
+`wasm.teamPersonalOwnerUid`, and removes `X-Wujie-Team-Id` when present.
+Team callouts keep credentials and response bodies out of plugin logs.
+The HTTP 400, 401, 402 and 403 admission results are returned as OpenAI-compatible
+errors. Other upstream failures become HTTP 503.
+
+For mixed routes and their fallbacks, set the internal `teamReportService` on
+`ai-token-report` and leave `requireTeamId` disabled. Team admission errors
+return before upstream dispatch. Keep the legacy route configuration where
+team billing is disabled.
