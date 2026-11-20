@@ -36,6 +36,7 @@ const (
 	CtxAccumulatedBody = "accumulated_body"
 	CtxSkipPlugin      = "skip_token_report"
 	CtxProductSource   = "token_report_product_source"
+	CtxResponseStatus  = "token_report_response_status"
 	providerTypeKey    = "providerType"
 
 	// HTTP headers
@@ -94,6 +95,7 @@ func init() {
 		wrapper.ParseConfig(parseConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
+		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
 	)
@@ -691,6 +693,16 @@ func dispatchTeamReport(config TokenUsageReportConfig, requestID string, body []
 	return err
 }
 
+func onHttpResponseHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig) types.Action {
+	// Envoy may release the response header map before streaming/body callbacks.
+	// Capture the status while it is available; absence is never success.
+	status, err := proxywasm.GetHttpResponseHeader(":status")
+	if err == nil && status != "" {
+		ctx.SetContext(CtxResponseStatus, status)
+	}
+	return types.ActionContinue
+}
+
 func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageReportConfig, responseBody []byte) {
 	// Add panic recovery to ensure this function never interrupts the main flow
 	defer func() {
@@ -699,12 +711,15 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 		}
 	}()
 
-	// Check the final response at the shared JSON/SSE reporting boundary.
+	// Check the response at the shared JSON/SSE reporting boundary.
 	// A legacy balance denial has no team selector, so team admission guards
 	// alone cannot prevent it from being billed as personal usage. Do not use
 	// token count as a success signal: completed images may have zero tokens.
 	statusCode, err := proxywasm.GetHttpResponseHeader(":status")
-	if err != nil || statusCode != "200" {
+	if err != nil || statusCode == "" {
+		statusCode, _ = ctx.GetContext(CtxResponseStatus).(string)
+	}
+	if statusCode != "200" {
 		log.Debugf("ai-token-report: skip billing report for response status %q", statusCode)
 		return
 	}

@@ -35,6 +35,7 @@ func TestReportSourceSnapshot(t *testing.T) {
 			responseStatus                                        string
 			finalStatus, responseBody                             string
 			missingStatus                                         bool
+			statusUnavailableDuringBody                           bool
 			stream, teamRoute, hasAdmission, mixedRoute, rejected bool
 		}{
 			{name: "legacy 402 without team selector", responseStatus: "402"},
@@ -45,6 +46,11 @@ func TestReportSourceSnapshot(t *testing.T) {
 			{name: "legacy 402 actual body", responseStatus: "402", responseBody: `{"error":{"code":"insufficient_balance"}}`},
 			{name: "legacy 503 image data", responseStatus: "503", responseBody: `{"data":[]}`},
 			{name: "completed zero-token image", responseBody: `{"data":[{"url":"image.png"}]}`, expected: "unknown"},
+			{name: "success after response headers released", statusUnavailableDuringBody: true, expected: "unknown"},
+			{name: "SSE success after response headers released", statusUnavailableDuringBody: true, stream: true, expected: "unknown"},
+			{name: "image success after response headers released", statusUnavailableDuringBody: true, responseBody: `{"data":[{"url":"image.png"}]}`, expected: "unknown"},
+			{name: "402 after response headers released", statusUnavailableDuringBody: true, responseStatus: "402"},
+			{name: "503 SSE after response headers released", statusUnavailableDuringBody: true, responseStatus: "503", stream: true},
 			{name: "legacy 401", responseStatus: "401"},
 			{name: "legacy 403", responseStatus: "403"},
 			{name: "legacy 429", responseStatus: "429"},
@@ -115,6 +121,9 @@ func TestReportSourceSnapshot(t *testing.T) {
 					responseHeaders = append(responseHeaders, [2]string{":status", responseStatus})
 				}
 				host.CallOnResponseHeaders(id, responseHeaders, false)
+				if tc.statusUnavailableDuringBody {
+					require.NoError(t, proxywasm.RemoveHttpResponseHeader(":status"))
+				}
 				if tc.finalStatus != "" {
 					require.NoError(t, proxywasm.ReplaceHttpResponseHeader(":status", tc.finalStatus))
 				}
