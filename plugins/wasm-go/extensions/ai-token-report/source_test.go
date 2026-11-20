@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/test"
 	"github.com/stretchr/testify/require"
@@ -31,8 +32,32 @@ func TestReportSourceSnapshot(t *testing.T) {
 	test.RunTest(t, func(t *testing.T) {
 		for _, tc := range []struct {
 			name, sourceConfig, header, value, expected           string
+			responseStatus                                        string
+			finalStatus, responseBody                             string
+			missingStatus                                         bool
+			statusUnavailableDuringBody                           bool
 			stream, teamRoute, hasAdmission, mixedRoute, rejected bool
 		}{
+			{name: "legacy 402 without team selector", responseStatus: "402"},
+			{name: "legacy 402 SSE", responseStatus: "402", stream: true},
+			{name: "missing response status", missingStatus: true},
+			{name: "status changed to 402", finalStatus: "402"},
+			{name: "status changed to 402 SSE", finalStatus: "402", stream: true},
+			{name: "legacy 402 actual body", responseStatus: "402", responseBody: `{"error":{"code":"insufficient_balance"}}`},
+			{name: "legacy 503 image data", responseStatus: "503", responseBody: `{"data":[]}`},
+			{name: "completed zero-token image", responseBody: `{"data":[{"url":"image.png"}]}`, expected: "unknown"},
+			{name: "success after response headers released", statusUnavailableDuringBody: true, expected: "unknown"},
+			{name: "SSE success after response headers released", statusUnavailableDuringBody: true, stream: true, expected: "unknown"},
+			{name: "image success after response headers released", statusUnavailableDuringBody: true, responseBody: `{"data":[{"url":"image.png"}]}`, expected: "unknown"},
+			{name: "402 after response headers released", statusUnavailableDuringBody: true, responseStatus: "402"},
+			{name: "503 SSE after response headers released", statusUnavailableDuringBody: true, responseStatus: "503", stream: true},
+			{name: "legacy 401", responseStatus: "401"},
+			{name: "legacy 403", responseStatus: "403"},
+			{name: "legacy 429", responseStatus: "429"},
+			{name: "legacy 503", responseStatus: "503"},
+			{name: "legacy 503 SSE", responseStatus: "503", stream: true},
+			{name: "admitted team upstream 503", responseStatus: "503", mixedRoute: true, hasAdmission: true},
+			{name: "admitted team upstream 503 SSE", responseStatus: "503", mixedRoute: true, hasAdmission: true, stream: true},
 			{name: "team usage SSE", teamRoute: true, hasAdmission: true, expected: "unknown", stream: true},
 			{name: "team usage without admission", teamRoute: true, expected: "unknown"},
 			{name: "mixed route with team admission", mixedRoute: true, hasAdmission: true, expected: "unknown"},
@@ -77,15 +102,31 @@ func TestReportSourceSnapshot(t *testing.T) {
 				host.SetHttpRequestHeaders(id, append(headers, [2]string{tc.header, "rewritten-source"}))
 				require.Empty(t, host.GetCalloutAttributesFromContext(id))
 				body := []byte(`{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+				if tc.responseBody != "" {
+					body = []byte(tc.responseBody)
+				}
 				contentType := "application/json"
 				if tc.stream {
 					contentType = "text/event-stream"
 				}
 				responseStatus := "200"
+				if tc.responseStatus != "" {
+					responseStatus = tc.responseStatus
+				}
 				if tc.rejected {
 					responseStatus = "403"
 				}
-				host.CallOnResponseHeaders(id, [][2]string{{":status", responseStatus}, {"content-type", contentType}}, false)
+				responseHeaders := [][2]string{{"content-type", contentType}}
+				if !tc.missingStatus {
+					responseHeaders = append(responseHeaders, [2]string{":status", responseStatus})
+				}
+				host.CallOnResponseHeaders(id, responseHeaders, false)
+				if tc.statusUnavailableDuringBody {
+					require.NoError(t, proxywasm.RemoveHttpResponseHeader(":status"))
+				}
+				if tc.finalStatus != "" {
+					require.NoError(t, proxywasm.ReplaceHttpResponseHeader(":status", tc.finalStatus))
+				}
 				if tc.stream {
 					host.CallOnResponseBody(id, append(append([]byte("data: "), body...), []byte("\n\n")...), false)
 					require.Empty(t, host.GetCalloutAttributesFromContext(id), "must not report before original end-of-stream timing")
@@ -94,12 +135,19 @@ func TestReportSourceSnapshot(t *testing.T) {
 					host.CallOnResponseBody(id, body, true)
 				}
 				calls := host.GetCalloutAttributesFromContext(id)
-				if tc.rejected || (tc.teamRoute && !tc.hasAdmission) {
-					require.Empty(t, calls, "missing team attribution must never fall back to personal billing")
+				if tc.rejected || tc.responseStatus != "" || tc.finalStatus != "" || tc.missingStatus || (tc.teamRoute && !tc.hasAdmission) {
+					require.Empty(t, calls, "failed or unadmitted requests must never reach either billing endpoint")
 					host.CompleteHttpContext(id)
 					return
 				}
 				require.Len(t, calls, 1)
+				if tc.responseBody != "" {
+					var report TokenUsageReportRequest
+					require.NoError(t, json.Unmarshal(calls[0].Body, &report))
+					require.Zero(t, report.TotalToken, "successful images remain billable without token usage")
+					host.CompleteHttpContext(id)
+					return
+				}
 				var report map[string]any
 				require.NoError(t, json.Unmarshal(calls[0].Body, &report))
 				require.Equal(t, tc.expected, report["productSource"])
