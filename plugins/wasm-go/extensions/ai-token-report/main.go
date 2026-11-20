@@ -699,6 +699,16 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 		}
 	}()
 
+	// Check the final response at the shared JSON/SSE reporting boundary.
+	// A legacy balance denial has no team selector, so team admission guards
+	// alone cannot prevent it from being billed as personal usage. Do not use
+	// token count as a success signal: completed images may have zero tokens.
+	statusCode, err := proxywasm.GetHttpResponseHeader(":status")
+	if err != nil || statusCode != "200" {
+		log.Debugf("ai-token-report: skip billing report for response status %q", statusCode)
+		return
+	}
+
 	// Skip if disableOpenaiUsage is enabled
 	if config.disableOpenaiUsage {
 		log.Debugf("disableOpenaiUsage is enabled, skipping token usage report")
