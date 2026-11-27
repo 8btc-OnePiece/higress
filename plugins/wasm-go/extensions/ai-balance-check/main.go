@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/teambilling"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
@@ -35,6 +36,7 @@ type OpenAIError struct {
 }
 
 type BalanceCheckConfig struct {
+	autoAdmission         *BalanceCheckConfig
 	checkClient           wrapper.HttpClient
 	apiUrl                string
 	serviceName           string
@@ -46,6 +48,7 @@ type BalanceCheckConfig struct {
 	teamSettlement        string
 	teamVersionGuardOnly  bool
 	teamPaidPaths         map[string]bool
+	teamPaidMethod        string
 	unlistedConfig        *BalanceCheckConfig
 	teamFallback          string
 	teamSigningKey        string
@@ -57,14 +60,74 @@ func main() {}
 func init() {
 	wrapper.SetCtx(
 		"ai-balance-check",
-		wrapper.ParseConfig(parseConfig),
+		wrapper.ParseOverrideConfig(parseGlobalConfig, parseRuleConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessRequestBody(onTaskBody),
 	)
+}
+
+// Keep legacy policy route-local. Only the environment admission client is inherited.
+func parseGlobalConfig(raw gjson.Result, config *BalanceCheckConfig) error {
+	if err := parseConfig(raw, config); err != nil {
+		return err
+	}
+	address := raw.Get("teamApiUrl").String()
+	if address == "" || raw.Get("teamBilling").Bool() || config.teamRouteMode != "" {
+		return nil
+	}
+	endpoint, err := url.Parse(address)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.Path == "" || endpoint.Fragment != "" {
+		return fmt.Errorf("teamApiUrl requires an HTTPS admission endpoint")
+	}
+	if legacy := raw.Get("apiUrl").String(); legacy != "" {
+		origin, err := url.Parse(legacy)
+		if err != nil || origin.Scheme != endpoint.Scheme || origin.Host != endpoint.Host {
+			return fmt.Errorf("teamApiUrl must use the configured balance API origin")
+		}
+	}
+	service := raw.Get("serviceName").String()
+	if service == "" {
+		return fmt.Errorf("serviceName is required for team admission")
+	}
+	port := int64(443)
+	if endpoint.Port() != "" {
+		port, err = strconv.ParseInt(endpoint.Port(), 10, 32)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid admission port")
+		}
+	}
+	timeout := int32(defaultAPITimeout)
+	if v := raw.Get("apiTimeout"); v.Exists() {
+		if v.Int() <= 0 || v.Int() > 2147483647 {
+			return fmt.Errorf("invalid admission timeout")
+		}
+		timeout = int32(v.Int())
+	}
+	config.autoAdmission = &BalanceCheckConfig{
+		teamEndpoint: endpoint, teamRouteMode: "compat", apiTimeout: timeout,
+		checkClient: wrapper.NewClusterClient(wrapper.DnsCluster{ServiceName: service, Domain: endpoint.Hostname(), Port: port}),
+	}
+	return nil
+}
+
+func parseRuleConfig(raw gjson.Result, global BalanceCheckConfig, config *BalanceCheckConfig) error {
+	if err := parseConfig(raw, config); err != nil {
+		return err
+	}
+	config.autoAdmission = global.autoAdmission
+	return nil
 }
 
 func parseConfig(json gjson.Result, config *BalanceCheckConfig) error {
 	config.teamVersionGuardOnly = json.Get("teamVersionGuardOnly").Bool()
+	config.teamPaidMethod = json.Get("teamPaidMethod").String()
+	if config.teamPaidMethod != "" && (config.teamPaidMethod != http.MethodPost || !json.Get("teamPaidPaths").Exists()) {
+		return fmt.Errorf("teamPaidMethod requires POST and teamPaidPaths")
+	}
 	if config.teamVersionGuardOnly {
+		if json.Get("teamRouteMode").String() != "" || json.Get("teamSettlement").String() != "" || json.Get("teamPaidPaths").Exists() {
+			return fmt.Errorf("teamVersionGuardOnly must be false on a migrated team route")
+		}
 		return nil
 	}
 	if paths := json.Get("teamPaidPaths"); paths.Exists() {
@@ -138,7 +201,7 @@ func parseConfig(json gjson.Result, config *BalanceCheckConfig) error {
 		if teamBilling {
 			return fmt.Errorf("the legacy apiUrl is required when team billing is enabled")
 		}
-		log.Infof("ai-balance-check: apiUrl not configured, plugin will be disabled")
+		log.Debugf("ai-balance-check: legacy balance check disabled")
 		return nil
 	}
 
@@ -235,18 +298,102 @@ func sendErrorResponse(ctx wrapper.HttpContext, config *BalanceCheckConfig, mess
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) types.Action {
+	// Only shared Open Platform submission routes need the task body.
+	var op string
+	if config.autoAdmission != nil {
+		var err error
+		op, err = teambilling.Operation()
+		if err != nil {
+			return teamAdmissionError(http.StatusServiceUnavailable)
+		}
+		if (op == "task_create" || op == "task_create_sync") && config.teamRouteMode == "" {
+			if !ctx.HasRequestBody() || ctx.IsBinaryRequestBody() {
+				return teamAdmissionError(http.StatusBadRequest)
+			}
+			ctx.BufferRequestBody()
+			return types.HeaderStopIteration
+		}
+	}
+	ctx.DontReadRequestBody()
+	return admitOperation(ctx, config, op)
+}
+
+func onTaskBody(ctx wrapper.HttpContext, config BalanceCheckConfig, body []byte) types.Action {
+	var task struct {
+		Code int `json:"taskCode"`
+	}
+	if err := json.Unmarshal(body, &task); err != nil || task.Code <= 0 {
+		teamAdmissionError(http.StatusBadRequest)
+		return types.DataStopIterationNoBuffer
+	}
+	if task.Code != 2534 && task.Code != 2535 {
+		// Open Platform owns other task types and interprets their original team selector.
+		if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte("business-task")); err != nil {
+			teamAdmissionError(http.StatusServiceUnavailable)
+			return types.DataStopIterationNoBuffer
+		}
+		return types.DataContinue
+	}
+	if admitOperation(ctx, config, "forward") == types.ActionContinue {
+		return types.DataContinue
+	}
+	return types.DataStopIterationAndBuffer
+}
+
+func admitOperation(ctx wrapper.HttpContext, config BalanceCheckConfig, operation string) types.Action {
 	version, versionErr := proxywasm.GetHttpRequestHeader("X-Wujie-Billing-Version")
 	if versionErr != nil && versionErr != types.ErrorStatusNotFound {
 		return teamAdmissionError(http.StatusServiceUnavailable)
 	}
 	marked := versionErr == nil
-	if marked {
-		if version != "2" {
-			return teamAdmissionError(http.StatusBadRequest)
+
+	if config.autoAdmission != nil {
+		op := operation
+		if config.teamRouteMode != "" || (op == "external" && config.teamEndpoint != nil) {
+			// A previously configured strict/signed route keeps its own policy.
+			marker := "configured"
+			if op == config.teamSettlement && (op == "usage" || op == "image" || op == "search") {
+				marker = op
+			}
+			if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte(marker)); err != nil {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+		} else if op == "external" {
+			origin, _ := proxywasm.GetHttpRequestHeader("x-higress-fallback-from")
+			if teambilling.IsManagedRoute(origin) {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			// Business team headers belong to the upstream. Preserve existing business balance checks.
+			if config.teamVersionGuardOnly || config.apiUrl == "" {
+				return types.ActionContinue
+			}
+			return legacyBalance(ctx, config)
+		} else {
+			if marked && version != "2" {
+				return teamAdmissionError(http.StatusBadRequest)
+			}
+			if op == "unclassified" || op == "" {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte(op)); err != nil {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			if op == "read" {
+				return types.ActionContinue
+			}
+			config = *config.autoAdmission
+			config.teamSettlement = op
+			config.teamImageBillingModel = teambilling.PerCallModel(op)
+			if op == "image-pro" {
+				config.teamSettlement = "image"
+			}
 		}
-		if config.teamRouteMode == "" {
-			return teamAdmissionError(http.StatusServiceUnavailable)
-		}
+	}
+	if marked && version != "2" {
+		return teamAdmissionError(http.StatusBadRequest)
+	}
+	if marked && config.teamRouteMode == "" {
+		return teamAdmissionError(http.StatusServiceUnavailable)
 	}
 	if config.teamVersionGuardOnly {
 		return types.ActionContinue
@@ -257,7 +404,15 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 			return teamAdmissionError(http.StatusServiceUnavailable)
 		}
 		path, _, _ := strings.Cut(raw, "?")
-		if !config.teamPaidPaths[path] {
+		paid := config.teamPaidPaths[path]
+		if paid && config.teamPaidMethod != "" {
+			method, err := proxywasm.GetHttpRequestHeader(":method")
+			if err != nil || method == "" {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			paid = method == config.teamPaidMethod
+		}
+		if !paid {
 			if marked || config.teamRouteMode == "strict" {
 				return teamAdmissionError(http.StatusServiceUnavailable)
 			}
@@ -275,7 +430,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 			}
 		}
 	}
-	if config.apiUrl == "" {
+	if config.apiUrl == "" && config.teamEndpoint == nil {
 		log.Debugf("ai-balance-check: plugin disabled (no apiUrl)")
 		return types.ActionContinue
 	}
@@ -331,6 +486,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 		}
 	}
 
+	return legacyBalance(ctx, config)
+}
+
+func legacyBalance(ctx wrapper.HttpContext, config BalanceCheckConfig) types.Action {
 	// Get API key from X-Original-Api-Key header
 	apiKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
 	if err != nil {

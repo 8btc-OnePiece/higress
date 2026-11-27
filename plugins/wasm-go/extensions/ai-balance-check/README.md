@@ -4,6 +4,14 @@
 
 The AI Balance Check plugin is a Higress WASM plugin that validates user balance before allowing requests to proceed. It performs an asynchronous HTTP call to a balance check service and blocks the request if the balance check fails.
 
+## 预发自营模型的自动团队准入
+
+两个新版镜像就绪后，在同一变更窗口先启用用量插件的全局配置，再启用余额插件的全局配置。hw-pref 控制台余额插件的 YAML 视图使用 [hw-pref-global.yaml](hw-pref-global.yaml)。这份配置只提供 Claw 的准入客户端。原先全局关闭余额检查的环境使用此文件开启全局插件，旧个人余额地址仅保留在本来就需要旧余额检查的路由规则中。Higress 在全局插件关闭时不会把默认配置传给 Wasm。
+
+自营模型使用 Higress 实际选中的 `ai-route-*.internal` 路由；历史自定义名称的模型路由也可通过 ai-proxy 写入的 provider 类型识别。新旧模型共用准入，通过原 API Key 查询 Claw。旧客户端省略团队时使用登录账号自己的默认团队。新版付费请求缺团队时返回 `400 invalid_team`。企业 JWT 入口沿用独立鉴权。
+
+Open Platform 的异步和非流式同步建单共用业务接口。插件读取请求的 `taskCode`，只对 2534 Banana 和 2535 搜索绑定团队，然后把团队 UUID 转交给 Open Platform。其他任务继续由 Open Platform 处理。查询和插件试用接口沿用业务鉴权，试用状态和消费授权都保留原团队头。旧版显式配置的路由继续执行原策略。
+
 ## Features
 
 - **Asynchronous Balance Checking**: Uses non-blocking HTTP calls to check user balance
@@ -248,4 +256,4 @@ For issues and questions, please refer to the Higress documentation and communit
 首批聊天和 Banana 使用上述三种结算配置，无需新增签名密钥。仅在实际聊天和出图路由启用用量上报。
 成员或余额校验失败分别返回 HTTP 422 的 `team_access_denied` 或 `team_credits_unavailable`。
 
-采用原 URL 的网关可在模型前缀规则上设置 `teamPaidPaths` 精确路径列表。名单外的新版请求在进入上游前被拒绝。迁移已有前缀时，将旧余额规则的有效配置保存在 `teamUnlistedPathConfig`（原先关闭时为 `{}`），并在上报插件保存其自身的旧配置。旧请求按原规则处理，原规则无法识别显式团队时拒绝请求。未提供旧余额配置时沿用现有 `apiUrl` 做旧余额检查。原来未启用余额检查的入口可启用 `teamVersionGuardOnly: true`，仅拒绝带计费版本的未迁移请求，保留旧请求的直通行为。
+采用原 URL 的网关可在模型前缀规则上设置 `teamPaidPaths` 精确路径列表。若仅 POST 产生消费，可同时设置 `teamPaidMethod: POST`；GET、OPTIONS 等方法按名单外请求处理。省略该字段时仅按路径匹配。名单外的新版请求在进入上游前被拒绝。迁移已有前缀时，将旧余额规则的有效配置保存在 `teamUnlistedPathConfig`（原先关闭时为 `{}`），并在上报插件保存其自身的旧配置。旧请求按原规则处理，原规则无法识别显式团队时拒绝请求。未提供旧余额配置时沿用现有 `apiUrl` 做旧余额检查。原来未启用余额检查的入口可启用 `teamVersionGuardOnly: true`，仅拒绝带计费版本的未迁移请求，保留旧请求的直通行为。若全局启用这一守卫，迁移路由的有效配置须显式设置 `teamVersionGuardOnly: false`。同时配置仅守卫和团队路由策略会导致插件配置校验失败。

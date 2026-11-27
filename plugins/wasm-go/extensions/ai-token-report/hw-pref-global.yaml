@@ -1,0 +1,10 @@
+reportApiUrl: https://pref-gate.wujieai.com/open-platform-private/model/usage/report
+reportServiceName: wujieai-pref
+reportTimeout: 3000
+disableOpenaiUsage: false
+source:
+  allowedValues:
+    - wujieai
+  fallbackValue: unknown
+  headerName: x-wujie-source
+teamReportService: onepiece-open-platform-internal.dns

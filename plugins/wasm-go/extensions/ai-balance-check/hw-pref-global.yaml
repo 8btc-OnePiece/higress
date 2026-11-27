@@ -1,0 +1,3 @@
+serviceName: wujieai-pref
+teamApiUrl: https://pref-gate.wujieai.com/wj-open/v2/claw/internal/aipc/teams/billing-admission
+apiTimeout: 3000

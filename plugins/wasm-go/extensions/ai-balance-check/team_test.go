@@ -338,3 +338,83 @@ func TestPaidPathScope(t *testing.T) {
 		}
 	})
 }
+
+func TestBananaPolicyOnGuardedPrefix(t *testing.T) {
+	test.RunTest(t, func(t *testing.T) {
+		t.Run("conflicting guard and migration", func(t *testing.T) {
+			h, status := test.NewTestHost([]byte(`{"teamVersionGuardOnly":true,"teamRouteMode":"compat","teamSettlement":"forward"}`))
+			defer h.Reset()
+			if status == types.OnPluginStartStatusOK {
+				t.Fatal("accepted conflicting guard and migration configuration")
+			}
+		})
+		for _, route := range []struct{ path, settlement string }{
+			{"/wj-open/v2/open-platform/task/task_create", "forward"},
+			{"/v1/images/generations", "image"},
+		} {
+			for _, tc := range []struct {
+				name, path, team, version, method string
+				want                              uint32
+				admit                             bool
+			}{
+				{"marked missing team", route.path, "", "2", "POST", 400, false},
+				{"blank team selector", route.path, " ", "2", "POST", 400, false},
+				{"malformed team selector", route.path, "invalid", "", "POST", 400, false},
+				{"selected team", route.path, "9943d4d9-d20b-49db-809d-88586f950fc7", "2", "POST", 0, true},
+				{"legacy default team", route.path, "", "", "POST", 0, true},
+				{"preflight on paid path", route.path, "", "", "OPTIONS", 0, false},
+				{"marked read on write path", route.path, "", "2", "GET", 503, false},
+				{"unlisted legacy read", "/unlisted", "", "", "GET", 0, false},
+				{"unlisted versioned request", "/unlisted", "", "2", "POST", 503, false},
+			} {
+				t.Run(route.settlement+"/"+tc.name, func(t *testing.T) {
+					cfg := fmt.Sprintf(`{"teamVersionGuardOnly":false,"teamBilling":true,"apiUrl":"https://a.test/old","teamApiUrl":"https://a.test/admit","serviceName":"billing","teamRouteMode":"compat","teamSettlement":%q,"teamImageBillingModel":"banana-times","teamPaidMethod":"POST","teamPaidPaths":[%q],"teamUnlistedPathConfig":{"teamVersionGuardOnly":true}}`, route.settlement, route.path)
+					h, status := test.NewTestHost([]byte(cfg))
+					defer h.Reset()
+					if status != types.OnPluginStartStatusOK {
+						t.Fatal(status)
+					}
+					headers := [][2]string{{":method", tc.method}, {":authority", "a.test"}, {":path", tc.path}, {OriginalAPIKey, "fixture"}}
+					if tc.team != "" {
+						headers = append(headers, [2]string{teamUUIDHeader, tc.team})
+					}
+					if tc.version != "" {
+						headers = append(headers, [2]string{"X-Wujie-Billing-Version", tc.version})
+					}
+					h.CallOnHttpRequestHeaders(headers)
+					response, calls := h.GetLocalResponse(), h.GetHttpCalloutAttributes()
+					if (tc.want != 0 && (response == nil || response.StatusCode != tc.want)) || (tc.want == 0 && response != nil) {
+						t.Fatalf("local response = %+v, want %d", response, tc.want)
+					}
+					if !tc.admit {
+						if len(calls) != 0 {
+							t.Fatalf("unexpected admission calls: %d", len(calls))
+						}
+						return
+					}
+					wantBody := "{}"
+					if tc.team != "" {
+						wantBody = fmt.Sprintf(`{"teamUuid":%q}`, tc.team)
+					}
+					if len(calls) != 1 || !hasCalloutHeader(calls[0].Headers, ":path", "/admit") || string(calls[0].Body) != wantBody {
+						t.Fatal("wrong admission request")
+					}
+					const uuid = "9943d4d9-d20b-49db-809d-88586f950fc7"
+					h.CallOnHttpCall([][2]string{{":status", "200"}}, []byte(`{"teamId":"42","teamUuid":"`+uuid+`"}`))
+					if v, _ := proxywasm.GetProperty([]string{teamIDProperty}); string(v) != "42" {
+						t.Fatal("lost admitted team")
+					}
+					if route.settlement == "forward" {
+						v, _ := proxywasm.GetProperty([]string{"wasm.teamBillingSettlement"})
+						selector, _ := proxywasm.GetHttpRequestHeader(teamUUIDHeader)
+						if string(v) != "forward" || selector != uuid {
+							t.Fatal("missing admitted team on submission")
+						}
+					} else if v, _ := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"}); string(v) != "banana-times" {
+						t.Fatal("missing image price model")
+					}
+				})
+			}
+		}
+	})
+}
