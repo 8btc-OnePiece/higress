@@ -33,8 +33,13 @@ func TestAutomaticAdmission(t *testing.T) {
 			{"image missing team", image, "POST", "/v1/images/generations", "2", "", "", "", 400},
 			{"task query is free", platform, "GET", "/wj-open/v2/open-platform/task/v2/task_info?taskKey=x", "2", selected, "", "read", 0},
 			{"other unmarked prefix path retains old check", platform, "GET", "/wj-open/v2/other", "", "", "/personal", "", 0},
-			{"unsupported marked operation", platform, "POST", create + "_sync", "2", selected, "", "", 503},
-			{"unsupported explicitly selected team", "ai-route-banana.internal", "POST", "/v1/images/generations", "", selected, "", "", 503},
+			{"2535 sync submission", platform, "POST", create + "_sync", "2", selected, "/admit", "forward", 0},
+			{"old image model with team", "ai-route-banana.internal", "POST", "/v1/images/generations", "", selected, "/admit", "usage", 0},
+			{"custom named legacy provider", "preexisting-llm", "POST", "/vendor/chat/invoke", "", "", "/admit", "usage", 0},
+			{"legacy v4 pro resolves default", "ai-route-deepseek-v4-pro.internal", "POST", "/v1/chat/completions", "", "", "/admit", "usage", 0},
+			{"2535 inner search", "ai-route-deepseek.internal", "POST", "/v1/tools/search", "2", selected, "/admit", "search", 0},
+			{"trial status", "wujieai-claw", "POST", "/wj-open/v2/claw/aipc/plugin-trials/status", "", selected, "", "", 0},
+			{"trial consume", "wujieai-claw", "POST", "/wj-open/v2/claw/aipc/plugin-trials/consume", "", selected, "", "", 0},
 			{"other legacy route retains global pass", "unrelated", "POST", "/other", "", "", "", "", 0},
 			{"invalid version", image, "POST", "/v1/images/generations", "3", selected, "", "", 400},
 		} {
@@ -43,6 +48,9 @@ func TestAutomaticAdmission(t *testing.T) {
 				defer h.Reset()
 				require.Equal(t, types.OnPluginStartStatusOK, status)
 				require.NoError(t, h.SetRouteName(tc.route))
+				if tc.route == "preexisting-llm" {
+					require.NoError(t, h.SetProperty([]string{"wasm.providerType"}, []byte("openai")))
+				}
 				headers := [][2]string{{":authority", "test.example"}, {":path", tc.path}, {":method", tc.method}, {OriginalAPIKey, "fixture"}}
 				if tc.version != "" {
 					headers = append(headers, [2]string{"X-Wujie-Billing-Version", tc.version})
@@ -51,6 +59,15 @@ func TestAutomaticAdmission(t *testing.T) {
 					headers = append(headers, [2]string{teamUUIDHeader, tc.team})
 				}
 				action := h.CallOnHttpRequestHeaders(headers)
+				if tc.path == create || tc.path == create+"_sync" {
+					require.Equal(t, types.HeaderStopIteration, action)
+					require.Empty(t, h.GetHttpCalloutAttributes())
+					body := `{"taskCode":2534}`
+					if tc.path == create+"_sync" {
+						body = `{"taskCode":2535}`
+					}
+					action = h.CallOnHttpRequestBody([]byte(body))
+				}
 				calls := h.GetHttpCalloutAttributes()
 				if tc.status != 0 {
 					require.NotNil(t, h.GetLocalResponse())
@@ -63,7 +80,11 @@ func TestAutomaticAdmission(t *testing.T) {
 					require.Len(t, calls, 1)
 					require.Contains(t, calls[0].Headers, [2]string{":path", tc.call})
 					if tc.call == "/admit" {
-						require.Equal(t, types.HeaderStopAllIterationAndWatermark, action)
+						if tc.op == "forward" {
+							require.Equal(t, types.DataStopIterationAndBuffer, action)
+						} else {
+							require.Equal(t, types.HeaderStopAllIterationAndWatermark, action)
+						}
 						want := "{}"
 						if tc.team != "" {
 							want = `{"teamUuid":"` + selected + `"}`
@@ -85,11 +106,35 @@ func TestAutomaticAdmission(t *testing.T) {
 				} else {
 					require.Empty(t, calls)
 				}
+				if tc.route == "wujieai-claw" {
+					team, err := proxywasm.GetHttpRequestHeader(teamUUIDHeader)
+					require.NoError(t, err)
+					require.Equal(t, selected, team)
+				}
 				if tc.op != "" {
 					v, _ := proxywasm.GetProperty([]string{teambilling.OperationProperty})
 					require.Equal(t, tc.op, string(v))
 				}
 			})
 		}
+	})
+}
+
+func TestSharedTaskEntryPreservesOtherTaskTypes(t *testing.T) {
+	const config = `{"teamApiUrl":"https://admission.test/admit","serviceName":"billing"}`
+	test.RunTest(t, func(t *testing.T) {
+		h, start := test.NewTestHost([]byte(config))
+		defer h.Reset()
+		require.Equal(t, types.OnPluginStartStatusOK, start)
+		require.NoError(t, h.SetRouteName("wujieai-open-platform"))
+		require.Equal(t, types.HeaderStopIteration, h.CallOnHttpRequestHeaders([][2]string{
+			{":method", "POST"}, {":path", "/wj-open/v2/open-platform/task/task_create"}, {":authority", "test.example"}, {"content-type", "application/json"},
+		}))
+		require.Equal(t, types.DataContinue, h.CallOnHttpRequestBody([]byte(`{"taskCode":2504,"param":"{}"}`)))
+		require.Empty(t, h.GetHttpCalloutAttributes())
+		require.Nil(t, h.GetLocalResponse())
+		value, err := proxywasm.GetProperty([]string{teambilling.OperationProperty})
+		require.NoError(t, err)
+		require.Equal(t, "business-task", string(value))
 	})
 }

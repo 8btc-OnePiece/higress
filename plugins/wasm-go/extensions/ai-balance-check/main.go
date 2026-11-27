@@ -62,6 +62,7 @@ func init() {
 		"ai-balance-check",
 		wrapper.ParseOverrideConfig(parseGlobalConfig, parseRuleConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessRequestBody(onTaskBody),
 	)
 }
 
@@ -297,43 +298,99 @@ func sendErrorResponse(ctx wrapper.HttpContext, config *BalanceCheckConfig, mess
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) types.Action {
+	// Only shared Open Platform submission routes need the task body.
+	var op string
+	if config.autoAdmission != nil {
+		var err error
+		op, err = teambilling.Operation()
+		if err != nil {
+			return teamAdmissionError(http.StatusServiceUnavailable)
+		}
+		if op == "task" && config.teamRouteMode == "" {
+			if !ctx.HasRequestBody() || ctx.IsBinaryRequestBody() {
+				return teamAdmissionError(http.StatusBadRequest)
+			}
+			ctx.BufferRequestBody()
+			return types.HeaderStopIteration
+		}
+	}
+	ctx.DontReadRequestBody()
+	return admitOperation(ctx, config, op)
+}
+
+func onTaskBody(ctx wrapper.HttpContext, config BalanceCheckConfig, body []byte) types.Action {
+	var task struct {
+		Code int `json:"taskCode"`
+	}
+	if err := json.Unmarshal(body, &task); err != nil || task.Code <= 0 {
+		teamAdmissionError(http.StatusBadRequest)
+		return types.DataStopIterationNoBuffer
+	}
+	if task.Code != 2534 && task.Code != 2535 {
+		// Open Platform owns other task types and interprets their original team selector.
+		if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte("business-task")); err != nil {
+			teamAdmissionError(http.StatusServiceUnavailable)
+			return types.DataStopIterationNoBuffer
+		}
+		return types.DataContinue
+	}
+	if admitOperation(ctx, config, "forward") == types.ActionContinue {
+		return types.DataContinue
+	}
+	return types.DataStopIterationAndBuffer
+}
+
+func admitOperation(ctx wrapper.HttpContext, config BalanceCheckConfig, operation string) types.Action {
 	version, versionErr := proxywasm.GetHttpRequestHeader("X-Wujie-Billing-Version")
 	if versionErr != nil && versionErr != types.ErrorStatusNotFound {
 		return teamAdmissionError(http.StatusServiceUnavailable)
 	}
 	marked := versionErr == nil
-	if marked && version != "2" {
-		return teamAdmissionError(http.StatusBadRequest)
-	}
+
 	if config.autoAdmission != nil {
-		op, err := teambilling.Operation()
-		if err != nil {
-			return teamAdmissionError(http.StatusServiceUnavailable)
-		}
-		if op != "" {
-			if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte(op)); err != nil {
+		op := operation
+		if config.teamRouteMode != "" || (op == "external" && config.teamEndpoint != nil) {
+			// A previously configured strict/signed route keeps its own policy.
+			marker := "configured"
+			if op == config.teamSettlement && (op == "usage" || op == "image" || op == "search") {
+				marker = op
+			}
+			if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte(marker)); err != nil {
 				return teamAdmissionError(http.StatusServiceUnavailable)
 			}
-		}
-		if op == "read" {
-			return types.ActionContinue
-		}
-		// Preserve explicitly closed, strict and signed routes during a rolling migration.
-		if op != "" && config.teamRouteMode == "" {
-			config = *config.autoAdmission
-			config.teamSettlement = op
-			if op == "image" {
-				config.teamImageBillingModel = teambilling.BananaSKU
-			}
-		} else if op == "" && config.teamRouteMode == "" {
+		} else if op == "external" {
 			origin, _ := proxywasm.GetHttpRequestHeader("x-higress-fallback-from")
 			if teambilling.IsManagedRoute(origin) {
 				return teamAdmissionError(http.StatusServiceUnavailable)
 			}
-			if _, err := proxywasm.GetHttpRequestHeader(teamUUIDHeader); err != types.ErrorStatusNotFound {
+			// Business team headers belong to the upstream. Preserve existing business balance checks.
+			if config.teamVersionGuardOnly || config.apiUrl == "" {
+				return types.ActionContinue
+			}
+			return legacyBalance(ctx, config)
+		} else {
+			if marked && version != "2" {
+				return teamAdmissionError(http.StatusBadRequest)
+			}
+			if op == "unclassified" || op == "" {
 				return teamAdmissionError(http.StatusServiceUnavailable)
 			}
+			if err := proxywasm.SetProperty([]string{teambilling.OperationProperty}, []byte(op)); err != nil {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			if op == "read" {
+				return types.ActionContinue
+			}
+			config = *config.autoAdmission
+			config.teamSettlement = op
+			config.teamImageBillingModel = teambilling.PerCallModel(op)
+			if op == "image-pro" {
+				config.teamSettlement = "image"
+			}
 		}
+	}
+	if marked && version != "2" {
+		return teamAdmissionError(http.StatusBadRequest)
 	}
 	if marked && config.teamRouteMode == "" {
 		return teamAdmissionError(http.StatusServiceUnavailable)
@@ -429,6 +486,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 		}
 	}
 
+	return legacyBalance(ctx, config)
+}
+
+func legacyBalance(ctx wrapper.HttpContext, config BalanceCheckConfig) types.Action {
 	// Get API key from X-Original-Api-Key header
 	apiKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
 	if err != nil {

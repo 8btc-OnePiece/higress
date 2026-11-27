@@ -79,6 +79,7 @@ type TokenUsageReportRequest struct {
 // TokenUsageReportConfig holds the configuration for token usage reporting
 type TokenUsageReportConfig struct {
 	autoReport         *TokenUsageReportConfig
+	delivery           *teamDelivery
 	reportClient       wrapper.HttpClient
 	reportApiUrl       string
 	reportServiceName  string
@@ -97,6 +98,7 @@ func init() {
 		"ai-token-report",
 		wrapper.ParseOverrideConfig(parseGlobalConfig, parseRuleConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessStreamDone(onStreamDone),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
@@ -111,6 +113,8 @@ func parseGlobalConfig(raw gjson.Result, config *TokenUsageReportConfig) error {
 	if config.teamReportCluster != nil && !config.requireTeamID {
 		team := *config
 		team.requireTeamID = true
+		team.delivery = &teamDelivery{cluster: team.teamReportCluster, timeout: uint32(team.reportTimeout), pending: make(map[*teamEvent]struct{})}
+		wrapper.RegisterTickFunc(0, team.delivery.flush)
 		config.autoReport = &team
 	}
 	return nil
@@ -256,6 +260,24 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	if opErr != nil && opErr != types.ErrorStatusNotFound {
 		return rejectTeamUsage(http.StatusServiceUnavailable)
 	}
+	if operation == "configured" {
+		operation = ""
+	}
+	if operation == "external" {
+		operation = ""
+		if !config.requireTeamID && getProviderType() == "" {
+			ctx.SetContext(CtxSkipPlugin, true)
+			ctx.DontReadRequestBody()
+			ctx.DontReadResponseBody()
+			return types.ActionContinue
+		}
+	}
+	if operation == "business-task" {
+		ctx.SetContext(CtxSkipPlugin, true)
+		ctx.DontReadRequestBody()
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
 	if operation != "" {
 		if config.autoReport != nil {
 			config = *config.autoReport
@@ -294,8 +316,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		if string(settlement) != "forward" || err != nil || parseErr != nil || teamID <= 0 || ownerErr != types.ErrorStatusNotFound {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
 		}
-	case "image":
-		if len(settlement) != 0 || string(perCallModel) != teambilling.BananaSKU {
+	case "image", "image-pro", "search":
+		if len(settlement) != 0 || string(perCallModel) != teambilling.PerCallModel(operation) {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
 		}
 	case "usage":
@@ -347,6 +369,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		identity := readUsageIdentity()
 		if identity.userKey == "" || identity.requestID == "" {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+		if config.delivery != nil {
+			event := config.delivery.reserve(identity.requestID)
+			if event == nil {
+				return rejectTeamUsage(http.StatusServiceUnavailable)
+			}
+			ctx.SetContext("teamDeliveryEvent", event)
 		}
 		ctx.SetContext("billingIdentity", identity)
 		ctx.SetContext("billingTeamId", teamID)
@@ -785,6 +814,13 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 	log.Infof("Reporting token usage to %s: requestId=%s, model=%s, inputToken=%d, outputToken=%d, totalToken=%d, duration=%d",
 		config.reportApiUrl, requestID, model, inputTokens, outputTokens, totalTokens, duration)
 
+	if config.delivery != nil {
+		event := ctx.GetContext("teamDeliveryEvent").(*teamEvent)
+		if event.body == nil {
+			event.body = jsonData
+		}
+		return
+	}
 	if teamID > 0 {
 		err = dispatchTeamReport(config, requestID, jsonData)
 	} else {
@@ -813,6 +849,12 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 	if err != nil {
 		log.Errorf("Failed to dispatch token usage report call: %v", err)
 		return
+	}
+}
+
+func onStreamDone(ctx wrapper.HttpContext, config TokenUsageReportConfig) {
+	if event, ok := ctx.GetContext("teamDeliveryEvent").(*teamEvent); ok && event.body == nil {
+		delete(config.forStream(ctx).delivery.pending, event)
 	}
 }
 

@@ -31,6 +31,7 @@ const (
 	irrelevant resultRole = iota
 	rootObject
 	imageArray
+	searchResults
 	imageObject
 )
 
@@ -145,12 +146,14 @@ func (p *resultJSON) startValue(c byte, parent *resultFrame) {
 			child.expect = firstElement
 			if parent.role == rootObject {
 				if p.search && parent.field == "results" {
-					p.found = true
+					child.role = searchResults
 				}
 				if !p.search && parent.field == "data" {
 					child.role = imageArray
 				}
 			}
+		} else if parent.role == searchResults {
+			p.found = true
 		} else if parent.role == imageArray {
 			child.role = imageObject
 		}

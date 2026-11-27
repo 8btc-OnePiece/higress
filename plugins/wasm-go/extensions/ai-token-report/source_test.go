@@ -57,9 +57,17 @@ func TestReportSourceSnapshot(t *testing.T) {
 					config += `,"teamReportService":"onepiece-open-platform-internal.dns"`
 				}
 				hostConfig := json.RawMessage(config + `}`)
+				if tc.mixedRoute {
+					// Historical mixed rules are route overrides; enabling the global team
+					// destination is the opt-in to automatic migration for model ingresses.
+					hostConfig = json.RawMessage(`{"_rules_":[` + config + `,"_match_route_":["mixed"]}]}`)
+				}
 				host, status := test.NewTestHost(hostConfig)
 				defer host.Reset()
 				require.Equal(t, types.OnPluginStartStatusOK, status)
+				if tc.mixedRoute {
+					require.NoError(t, host.SetRouteName("mixed"))
+				}
 				require.NoError(t, host.SetProperty([]string{"wasm.providerType"}, []byte("openai")))
 				require.NoError(t, host.SetProperty([]string{"wasm.requestModel"}, []byte("gpt-4")))
 				id := host.InitializeHttpContext()
@@ -164,7 +172,7 @@ func TestPerCallSettlement(t *testing.T) {
 			{"per-call image without tokens", "200", `{"data":[{"url":"https://example.test/output.png"}]}`, "gemini-3.1-flash-image-preview-times", true},
 			{"upstream name is not the invoiced model", "200", `{"model":"gemini-3.1-flash-image-preview","usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11},"data":[{"b64_json":"AQ=="}]}`, "gemini-3.1-flash-image-preview-times", true},
 			{"unsuccessful provider response", "503", `{"error":{"message":"unavailable"}}`, "gemini-3.1-flash-image-preview-times", false},
-			{"zero search matches", "200", `{"results":[]}`, "deepseek-search", true},
+			{"zero search matches", "200", `{"results":[]}`, "deepseek-search", false},
 			{"successful search", "200", `{"results":[{"url":"https://example.test/result"}]}`, "deepseek-search", true},
 			{"invalid search response", "200", `{"error":"disabled"}`, "deepseek-search", false},
 			{"empty result", "200", `{"data":[]}`, "gemini-3.1-flash-image-preview-times", false},

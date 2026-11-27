@@ -8,9 +8,9 @@ The AI Balance Check plugin is a Higress WASM plugin that validates user balance
 
 两个新版镜像就绪后，在同一变更窗口先启用用量插件的全局配置，再启用余额插件的全局配置。hw-pref 控制台余额插件的 YAML 视图使用 [hw-pref-global.yaml](hw-pref-global.yaml)。这份配置只提供 Claw 的准入客户端。原先全局关闭余额检查的环境使用此文件开启全局插件，旧个人余额地址仅保留在本来就需要旧余额检查的路由规则中。Higress 在全局插件关闭时不会把默认配置传给 Wasm。
 
-插件使用 Envoy 选中的 Ingress、HTTP 方法和路径查找[操作表](../../pkg/teambilling/routes.go)。DeepSeek V4 Flash 聊天校验团队后按 token 上报，Banana 2 的 `-times` 出图和编辑按目录价格计次。Open Platform 的 POST 建单校验后转交团队，GET 查询沿用业务鉴权，免计费。建单路径由多个任务类型共用。迁移时应将请求控制在受支持的任务范围内。
+自营模型使用 Higress 实际选中的 `ai-route-*.internal` 路由；历史自定义名称的模型路由也可通过 ai-proxy 写入的 provider 类型识别。新旧模型共用准入，通过原 API Key 查询 Claw。旧客户端省略团队时使用登录账号自己的默认团队。新版付费请求缺团队时返回 `400 invalid_team`。企业 JWT 入口沿用独立鉴权。
 
-新版客户端省略团队返回 `400 invalid_team`。旧客户端省略版本和团队时，由 Claw 用原 API Key 解析默认团队。未接入的入口拒绝携带团队或计费版本的请求。历史显式准入配置继续生效；原规则只有版本守卫且曾关闭余额检查时，可移除整条守卫绑定，让它继承新的全局默认。仅删守卫字段而留下旧余额 URL，会使名单外请求重新启用旧余额检查。回滚时在停止新准入后成对恢复两个镜像及原全局配置，保留在途结算。
+Open Platform 的异步和非流式同步建单共用业务接口。插件读取请求的 `taskCode`，只对 2534 Banana 和 2535 搜索绑定团队，然后把团队 UUID 转交给 Open Platform。其他任务继续由 Open Platform 处理。查询和插件试用接口沿用业务鉴权，试用状态和消费授权都保留原团队头。旧版显式配置的路由继续执行原策略。
 
 ## Features
 
