@@ -60,9 +60,13 @@ func Operation() (string, error) {
 	path, _, _ := strings.Cut(raw, "?")
 	if name == "wujieai-open-platform" {
 		switch path {
-		case "/wj-open/v2/open-platform/task/task_create", "/wj-open/v2/open-platform/task/task_create_sync":
+		case "/wj-open/v2/open-platform/task/task_create":
 			if method == http.MethodPost {
-				return "task", nil
+				return "task_create", nil
+			}
+		case "/wj-open/v2/open-platform/task/task_create_sync":
+			if method == http.MethodPost {
+				return "task_create_sync", nil
 			}
 		case "/wj-open/v2/open-platform/task/v2/task_info", "/wj-open/v2/open-platform/task/task_info":
 			if method == http.MethodGet {

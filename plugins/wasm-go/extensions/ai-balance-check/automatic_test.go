@@ -138,3 +138,25 @@ func TestSharedTaskEntryPreservesOtherTaskTypes(t *testing.T) {
 		require.Equal(t, "business-task", string(value))
 	})
 }
+
+func TestExplicitUnavailablePrecedesFreeQuery(t *testing.T) {
+	const config = `{"teamApiUrl":"https://billing.test/admit","serviceName":"billing","_rules_":[{"_match_route_":["wujieai-open-platform"],"apiUrl":"https://billing.test/legacy","teamApiUrl":"https://billing.test/admit","serviceName":"billing","teamBilling":true,"teamRouteMode":"strict","teamSettlement":"unavailable"}]}`
+	test.RunTest(t, func(t *testing.T) {
+		for _, version := range []string{"", "2"} {
+			t.Run("version-"+version, func(t *testing.T) {
+				h, start := test.NewTestHost([]byte(config))
+				defer h.Reset()
+				require.Equal(t, types.OnPluginStartStatusOK, start)
+				require.NoError(t, h.SetRouteName("wujieai-open-platform"))
+				headers := [][2]string{{":authority", "test.example"}, {":method", "GET"}, {":path", "/wj-open/v2/open-platform/task/v2/task_info?taskKey=x"}, {teamUUIDHeader, "3493d4d9-d20b-49db-809d-88586f950fc7"}}
+				if version != "" {
+					headers = append(headers, [2]string{"X-Wujie-Billing-Version", version})
+				}
+				h.CallOnHttpRequestHeaders(headers)
+				require.NotNil(t, h.GetLocalResponse())
+				require.EqualValues(t, 503, h.GetLocalResponse().StatusCode)
+				require.Empty(t, h.GetHttpCalloutAttributes())
+			})
+		}
+	})
+}

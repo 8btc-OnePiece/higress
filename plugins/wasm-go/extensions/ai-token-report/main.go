@@ -309,11 +309,19 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	perCallModel, _ := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"})
 	switch operation {
 	case "", "read":
-	case "forward":
+	case "forward", "task_create", "task_create_sync":
+		if string(settlement) != "forward" {
+			// Older signed admission may publish only the settlement, or mark the request as forward.
+			// Only the matching Open Platform POST may delegate that signed operation.
+			expected, err := teambilling.Operation()
+			if err != nil || (expected != "task_create" && expected != "task_create_sync") || expected != string(settlement) {
+				return rejectTeamUsage(http.StatusServiceUnavailable)
+			}
+		}
 		admitted, err := proxywasm.GetProperty([]string{"wasm.teamId"})
 		teamID, parseErr := strconv.ParseInt(string(admitted), 10, 64)
 		_, ownerErr := proxywasm.GetProperty([]string{"wasm.teamPersonalOwnerUid"})
-		if string(settlement) != "forward" || err != nil || parseErr != nil || teamID <= 0 || ownerErr != types.ErrorStatusNotFound {
+		if err != nil || parseErr != nil || teamID <= 0 || ownerErr != types.ErrorStatusNotFound {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
 		}
 	case "image", "image-pro", "search":

@@ -306,7 +306,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 		if err != nil {
 			return teamAdmissionError(http.StatusServiceUnavailable)
 		}
-		if op == "task" && config.teamRouteMode == "" {
+		if (op == "task_create" || op == "task_create_sync") && config.teamRouteMode == "" {
 			if !ctx.HasRequestBody() || ctx.IsBinaryRequestBody() {
 				return teamAdmissionError(http.StatusBadRequest)
 			}
