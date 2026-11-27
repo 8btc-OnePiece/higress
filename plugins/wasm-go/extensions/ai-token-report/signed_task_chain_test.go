@@ -16,14 +16,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSignedTaskFilterChain(t *testing.T) {
+func buildBalanceFilter(t *testing.T) string {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), "balance.wasm")
 	build := exec.Command("go", "build", "-buildmode=c-shared", "-o", binary, ".")
 	build.Dir = "../ai-balance-check"
 	build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	output, err := build.CombinedOutput()
 	require.NoError(t, err, "%s", output)
+	return binary
+}
 
+func TestSignedTaskFilterChain(t *testing.T) {
+	binary := buildBalanceFilter(t)
 	const route = "wujieai-open-platform"
 	const uuid = "3493d4d9-d20b-49db-809d-88586f950fc7"
 	for _, settlement := range []string{"task_create", "task_create_sync"} {

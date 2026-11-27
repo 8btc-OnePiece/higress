@@ -250,15 +250,29 @@ func rejectTeamUsage(status int) types.Action {
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig) types.Action {
-	// Use the balance filter's decision even if the route or path has since been rewritten.
-	value, opErr := proxywasm.GetProperty([]string{teambilling.OperationProperty})
-	operation := string(value)
-	if opErr == types.ErrorStatusNotFound && config.autoReport != nil {
-		// An older balance filter has no marker. Guard catalog routes until admission is ready.
-		operation, opErr = teambilling.Operation()
+	// The paid-path decision is made after route classification in the balance filter.
+	unlisted := false
+	if config.unlistedConfig != nil {
+		marker, err := proxywasm.GetProperty([]string{"wasm.teamBillingUnlistedPath"})
+		if err != nil && err != types.ErrorStatusNotFound {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+		unlisted = string(marker) == "1"
 	}
-	if opErr != nil && opErr != types.ErrorStatusNotFound {
-		return rejectTeamUsage(http.StatusServiceUnavailable)
+	var operation string
+	if unlisted {
+		ctx.SetContext("streamReportConfig", config.unlistedConfig)
+		config = *config.unlistedConfig
+	} else {
+		value, err := proxywasm.GetProperty([]string{teambilling.OperationProperty})
+		operation = string(value)
+		if err == types.ErrorStatusNotFound && config.autoReport != nil {
+			// An older balance filter has no marker. Guard catalog routes until admission is ready.
+			operation, err = teambilling.Operation()
+		}
+		if err != nil && err != types.ErrorStatusNotFound {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
 	}
 	if operation == "configured" {
 		operation = ""
@@ -287,11 +301,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		}
 		config.requireTeamID = true
 		ctx.SetContext("streamReportConfig", &config)
-	} else if config.unlistedConfig != nil {
-		if value, err := proxywasm.GetProperty([]string{"wasm.teamBillingUnlistedPath"}); err == nil && string(value) == "1" {
-			ctx.SetContext("streamReportConfig", config.unlistedConfig)
-			config = *config.unlistedConfig
-		}
 	}
 	// Check if plugin is enabled
 	if config.reportApiUrl == "" && !config.requireTeamID {
