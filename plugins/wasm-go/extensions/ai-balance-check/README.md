@@ -4,6 +4,14 @@
 
 The AI Balance Check plugin is a Higress WASM plugin that validates user balance before allowing requests to proceed. It performs an asynchronous HTTP call to a balance check service and blocks the request if the balance check fails.
 
+## 预发自营模型的自动团队准入
+
+两个新版镜像就绪后，在同一变更窗口先启用用量插件的全局配置，再启用余额插件的全局配置。hw-pref 控制台余额插件的 YAML 视图使用 [hw-pref-global.yaml](hw-pref-global.yaml)。这份配置只提供 Claw 的准入客户端。原先全局关闭余额检查的环境使用此文件开启全局插件，旧个人余额地址仅保留在本来就需要旧余额检查的路由规则中。Higress 在全局插件关闭时不会把默认配置传给 Wasm。
+
+插件使用 Envoy 选中的 Ingress、HTTP 方法和路径查找[操作表](../../pkg/teambilling/routes.go)。DeepSeek V4 Flash 聊天校验团队后按 token 上报，Banana 2 的 `-times` 出图和编辑按目录价格计次。Open Platform 的 POST 建单校验后转交团队，GET 查询沿用业务鉴权，免计费。建单路径由多个任务类型共用。迁移时应将请求控制在受支持的任务范围内。
+
+新版客户端省略团队返回 `400 invalid_team`。旧客户端省略版本和团队时，由 Claw 用原 API Key 解析默认团队。未接入的入口拒绝携带团队或计费版本的请求。历史显式准入配置继续生效；原规则只有版本守卫且曾关闭余额检查时，可移除整条守卫绑定，让它继承新的全局默认。仅删守卫字段而留下旧余额 URL，会使名单外请求重新启用旧余额检查。回滚时在停止新准入后成对恢复两个镜像及原全局配置，保留在途结算。
+
 ## Features
 
 - **Asynchronous Balance Checking**: Uses non-blocking HTTP calls to check user balance

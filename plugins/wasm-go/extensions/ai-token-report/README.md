@@ -4,6 +4,12 @@
 
 AI Token Report 插件用于将 AI 服务的 token 使用情况上报到指定的报告 API。该插件独立于 ai-statistics 插件，专注于 token 使用数据的收集和上报。
 
+## 预发自营模型的自动团队上报
+
+[hw-pref-global.yaml](hw-pref-global.yaml) 可填入 hw-pref 用量插件的全局 YAML 视图。它在原有旧用量地址和来源配置上增加一次 `teamReportService`。两个插件镜像就绪后，先启用本插件的全局配置，再启用[余额插件的全局配置](../ai-balance-check/hw-pref-global.yaml)。
+
+已接入的请求优先沿用余额插件写在当前流上的操作和团队。建单与查询免上报；出图成功按次上报，聊天按用量上报。切换期间若余额插件没有写入操作，使用同一份[操作表](../../pkg/teambilling/routes.go)核对是否应有准入记录。缺少团队信息的已接入消费请求会在进入上游前被拒绝。名单外旧请求使用原有上报配置。恢复服务后按业务请求 ID 在 Account 核对唯一团队扣款。
+
 ## 功能特性
 
 - ✅ **Token 使用统计**：自动从 AI 服务响应中提取 token 使用量

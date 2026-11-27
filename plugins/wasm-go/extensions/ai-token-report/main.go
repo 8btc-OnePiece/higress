@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/teambilling"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
@@ -77,6 +78,7 @@ type TokenUsageReportRequest struct {
 
 // TokenUsageReportConfig holds the configuration for token usage reporting
 type TokenUsageReportConfig struct {
+	autoReport         *TokenUsageReportConfig
 	reportClient       wrapper.HttpClient
 	reportApiUrl       string
 	reportServiceName  string
@@ -93,13 +95,33 @@ func main() {}
 func init() {
 	wrapper.SetCtx(
 		"ai-token-report",
-		wrapper.ParseConfig(parseConfig),
+		wrapper.ParseOverrideConfig(parseGlobalConfig, parseRuleConfig),
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
 		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
 	)
+}
+
+func parseGlobalConfig(raw gjson.Result, config *TokenUsageReportConfig) error {
+	if err := parseConfig(raw, config); err != nil {
+		return err
+	}
+	if config.teamReportCluster != nil && !config.requireTeamID {
+		team := *config
+		team.requireTeamID = true
+		config.autoReport = &team
+	}
+	return nil
+}
+
+func parseRuleConfig(raw gjson.Result, global TokenUsageReportConfig, config *TokenUsageReportConfig) error {
+	if err := parseConfig(raw, config); err != nil {
+		return err
+	}
+	config.autoReport = global.autoReport
+	return nil
 }
 
 func parseConfig(json gjson.Result, config *TokenUsageReportConfig) error {
@@ -124,8 +146,7 @@ func parseConfig(json gjson.Result, config *TokenUsageReportConfig) error {
 	if config.requireTeamID && (config.reportApiUrl == "" || config.teamReportCluster == nil) {
 		return fmt.Errorf("reportApiUrl and teamReportService are required on team billing routes")
 	}
-	if config.reportApiUrl == "" {
-		log.Infof("ai-token-report: reportApiUrl not configured, plugin will be disabled")
+	if config.reportApiUrl == "" && config.teamReportCluster == nil {
 		return nil
 	}
 	var err error
@@ -155,6 +176,10 @@ func parseConfig(json gjson.Result, config *TokenUsageReportConfig) error {
 	} else {
 		config.disableOpenaiUsage = defaultDisableOpenaiUsage
 		log.Infof("disableOpenaiUsage not configured, using default: %v", defaultDisableOpenaiUsage)
+	}
+
+	if config.reportApiUrl == "" {
+		return nil
 	}
 
 	// Parse URL and extract actual domain and port
@@ -205,7 +230,7 @@ func parseConfig(json gjson.Result, config *TokenUsageReportConfig) error {
 
 // Use the balance filter's stream decision even after an upstream rewrites the path.
 func (cfg TokenUsageReportConfig) forStream(ctx wrapper.HttpContext) TokenUsageReportConfig {
-	if selected, ok := ctx.GetContext("unlistedReportConfig").(*TokenUsageReportConfig); ok {
+	if selected, ok := ctx.GetContext("streamReportConfig").(*TokenUsageReportConfig); ok {
 		return *selected
 	}
 	return cfg
@@ -221,14 +246,33 @@ func rejectTeamUsage(status int) types.Action {
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig) types.Action {
-	if config.unlistedConfig != nil {
+	// Use the balance filter's decision even if the route or path has since been rewritten.
+	value, opErr := proxywasm.GetProperty([]string{teambilling.OperationProperty})
+	operation := string(value)
+	if opErr == types.ErrorStatusNotFound && config.autoReport != nil {
+		// An older balance filter has no marker. Guard catalog routes until admission is ready.
+		operation, opErr = teambilling.Operation()
+	}
+	if opErr != nil && opErr != types.ErrorStatusNotFound {
+		return rejectTeamUsage(http.StatusServiceUnavailable)
+	}
+	if operation != "" {
+		if config.autoReport != nil {
+			config = *config.autoReport
+		}
+		if operation != "read" && config.teamReportCluster == nil {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+		config.requireTeamID = true
+		ctx.SetContext("streamReportConfig", &config)
+	} else if config.unlistedConfig != nil {
 		if value, err := proxywasm.GetProperty([]string{"wasm.teamBillingUnlistedPath"}); err == nil && string(value) == "1" {
-			ctx.SetContext("unlistedReportConfig", config.unlistedConfig)
+			ctx.SetContext("streamReportConfig", config.unlistedConfig)
 			config = *config.unlistedConfig
 		}
 	}
 	// Check if plugin is enabled
-	if config.reportApiUrl == "" {
+	if config.reportApiUrl == "" && !config.requireTeamID {
 		return types.ActionContinue
 	}
 	version, versionErr := proxywasm.GetHttpRequestHeader("X-Wujie-Billing-Version")
@@ -239,8 +283,29 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	if marked && version != "2" {
 		return rejectTeamUsage(http.StatusBadRequest)
 	}
-	// Trusted submission/forward routes settle at execution, including when this plugin is global.
-	if settlement, err := proxywasm.GetProperty([]string{"wasm.teamBillingSettlement"}); err == nil && len(settlement) != 0 {
+	settlement, _ := proxywasm.GetProperty([]string{"wasm.teamBillingSettlement"})
+	perCallModel, _ := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"})
+	switch operation {
+	case "", "read":
+	case "forward":
+		admitted, err := proxywasm.GetProperty([]string{"wasm.teamId"})
+		teamID, parseErr := strconv.ParseInt(string(admitted), 10, 64)
+		_, ownerErr := proxywasm.GetProperty([]string{"wasm.teamPersonalOwnerUid"})
+		if string(settlement) != "forward" || err != nil || parseErr != nil || teamID <= 0 || ownerErr != types.ErrorStatusNotFound {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+	case "image":
+		if len(settlement) != 0 || string(perCallModel) != teambilling.BananaSKU {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+	case "usage":
+		if len(settlement) != 0 || len(perCallModel) != 0 {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+	default:
+		return rejectTeamUsage(http.StatusServiceUnavailable)
+	}
+	if operation == "read" || len(settlement) != 0 {
 		ctx.SetContext(CtxSkipPlugin, true)
 		ctx.DontReadRequestBody()
 		ctx.DontReadResponseBody()
@@ -252,7 +317,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	ctx.SetContext(CtxProductSource, config.source.normalize(source))
 
 	// 检查 providerType，如果为空则跳过本插件（非 AI 路由）
-	perCallModel, _ := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"})
 	providerType := getProviderType()
 	if providerType == "" && len(perCallModel) == 0 {
 		if marked || config.requireTeamID {
@@ -275,7 +339,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 		owner, ownerErr := proxywasm.GetProperty([]string{"wasm.teamPersonalOwnerUid"})
 		if ownerErr != types.ErrorStatusNotFound {
 			uid, err := strconv.ParseInt(string(owner), 10, 64)
-			if marked || ownerErr != nil || err != nil || uid <= 0 {
+			if marked || ownerErr != nil || err != nil || uid <= 0 || operation != "" {
 				return rejectTeamUsage(http.StatusServiceUnavailable)
 			}
 			ctx.SetContext("billingPersonalOwnerUid", uid)
@@ -306,6 +370,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	requestModel := getRequestModel()
 	if len(perCallModel) != 0 {
 		requestModel = string(perCallModel)
+		ctx.SetContext("billingPerCallModel", requestModel)
 	}
 	ctx.SetContext(CtxKeyModel, requestModel)
 
@@ -322,7 +387,7 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, b
 	}
 
 	// 检查 plugin 是否启用
-	if config.reportApiUrl == "" {
+	if config.reportApiUrl == "" && !config.requireTeamID {
 		return types.ActionContinue
 	}
 
@@ -450,14 +515,14 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 	}
 
 	// Check if plugin is enabled
-	if config.reportApiUrl == "" {
+	if config.reportApiUrl == "" && !config.requireTeamID {
 		return data
 	}
 
-	if sku, err := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"}); err == nil {
+	if sku := ctx.GetStringContext("billingPerCallModel", ""); sku != "" {
 		result, _ := ctx.GetContext("teamResultJSON").(*resultJSON)
 		if result == nil {
-			result = &resultJSON{search: string(sku) == "deepseek-search"}
+			result = &resultJSON{search: sku == "deepseek-search"}
 			ctx.SetContext("teamResultJSON", result)
 		}
 		result.feed(data)
@@ -465,7 +530,7 @@ func onHttpStreamingBody(ctx wrapper.HttpContext, config TokenUsageReportConfig,
 			ctx.SetContext("teamHasBillableResult", result.billable())
 			ctx.SetContext("teamResultJSON", nil)
 		}
-		ctx.SetContext(CtxKeyModel, string(sku))
+		ctx.SetContext(CtxKeyModel, sku)
 	}
 	// Set first token time if not already set
 	if ctx.GetContext(CtxFirstToken) == nil {
@@ -533,7 +598,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 	}
 
 	// Check if plugin is enabled
-	if config.reportApiUrl == "" {
+	if config.reportApiUrl == "" && !config.requireTeamID {
 		return types.ActionContinue
 	}
 
@@ -595,13 +660,13 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config TokenUsageReportConfig, 
 
 	// Dedicated image routes may rewrite the provider model and also use per-call pricing.
 	// A successful image result is chargeable even when the provider omits token counts.
-	if perCallModel, err := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"}); err == nil {
-		result := resultJSON{search: string(perCallModel) == "deepseek-search"}
+	if perCallModel := ctx.GetStringContext("billingPerCallModel", ""); perCallModel != "" {
+		result := resultJSON{search: perCallModel == "deepseek-search"}
 		result.feed(body)
 		if !result.billable() {
 			return types.ActionContinue
 		}
-		ctx.SetContext(CtxKeyModel, string(perCallModel))
+		ctx.SetContext(CtxKeyModel, perCallModel)
 		ctx.SetContext("teamHasBillableResult", true)
 	}
 	// Report token usage
@@ -657,14 +722,14 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		}
 	}()
 
-	if sku, err := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"}); err == nil {
+	if sku := ctx.GetStringContext("billingPerCallModel", ""); sku != "" {
 		if !ctx.GetBoolContext("teamHasBillableResult", false) {
 			return
 		}
-		model = string(sku)
+		model = sku
 	}
 	// Skip if report API client is not configured
-	if config.reportClient == nil {
+	if config.reportClient == nil && !config.requireTeamID {
 		log.Debugf("reportClient not configured, skipping token usage report")
 		return
 	}
@@ -716,18 +781,6 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		return
 	}
 
-	// Parse URL to get path
-	parsedUrl, _ := url.Parse(config.reportApiUrl)
-	requestPath := parsedUrl.Path
-	if requestPath == "" {
-		requestPath = "/"
-	}
-
-	// Add query parameters if present
-	if parsedUrl.RawQuery != "" {
-		requestPath = requestPath + "?" + parsedUrl.RawQuery
-	}
-
 	// Call the reporting API asynchronously
 	log.Infof("Reporting token usage to %s: requestId=%s, model=%s, inputToken=%d, outputToken=%d, totalToken=%d, duration=%d",
 		config.reportApiUrl, requestID, model, inputTokens, outputTokens, totalTokens, duration)
@@ -735,6 +788,17 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 	if teamID > 0 {
 		err = dispatchTeamReport(config, requestID, jsonData)
 	} else {
+		// Parse URL to get path
+		parsedUrl, _ := url.Parse(config.reportApiUrl)
+		requestPath := parsedUrl.Path
+		if requestPath == "" {
+			requestPath = "/"
+		}
+
+		// Add query parameters if present
+		if parsedUrl.RawQuery != "" {
+			requestPath = requestPath + "?" + parsedUrl.RawQuery
+		}
 		err = config.reportClient.Post(
 			requestPath,
 			[][2]string{{"Content-Type", "application/json"}},
@@ -810,7 +874,7 @@ func reportTokenUsageFromContext(ctx wrapper.HttpContext, config TokenUsageRepor
 	}
 
 	// Skip if report API client is not configured
-	if config.reportClient == nil {
+	if config.reportClient == nil && !config.requireTeamID {
 		return
 	}
 
