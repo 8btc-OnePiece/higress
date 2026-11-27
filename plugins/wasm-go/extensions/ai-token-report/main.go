@@ -255,7 +255,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	perCallModel, _ := proxywasm.GetProperty([]string{"wasm.teamBillingPerCallModel"})
 	providerType := getProviderType()
 	if providerType == "" && len(perCallModel) == 0 {
-		if marked {
+		if marked || config.requireTeamID {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
 		}
 		log.Debugf("ai-token-report: providerType is empty, skipping (not an AI route)")
@@ -269,7 +269,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 	value, admissionErr := proxywasm.GetProperty([]string{"wasm.teamId"})
 	if admissionErr == nil {
 		teamID, err := strconv.ParseInt(string(value), 10, 64)
-		if err != nil || teamID <= 0 || config.teamReportCluster == nil || (marked && config.disableOpenaiUsage) {
+		if err != nil || teamID <= 0 || config.teamReportCluster == nil || ((marked || config.requireTeamID) && config.disableOpenaiUsage) {
 			return rejectTeamUsage(http.StatusServiceUnavailable)
 		}
 		owner, ownerErr := proxywasm.GetProperty([]string{"wasm.teamPersonalOwnerUid"})
@@ -280,6 +280,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config TokenUsageReportConfig
 			}
 			ctx.SetContext("billingPersonalOwnerUid", uid)
 		}
+		identity := readUsageIdentity()
+		if identity.userKey == "" || identity.requestID == "" {
+			return rejectTeamUsage(http.StatusServiceUnavailable)
+		}
+		ctx.SetContext("billingIdentity", identity)
 		ctx.SetContext("billingTeamId", teamID)
 	} else {
 		_, selectorErr := proxywasm.GetHttpRequestHeader(teamUUIDHeader)
@@ -389,6 +394,18 @@ func accumulateChunk(ctx wrapper.HttpContext, data []byte) bool {
 	ctx.SetContext(CtxAccumulatedBody, accumulatedBody)
 	log.Debugf("ai-token-report: accumulated body length=%d", len(accumulatedBody))
 	return true
+}
+
+type usageIdentity struct {
+	userKey   string
+	requestID string
+	taskID    string
+}
+
+func readUsageIdentity() usageIdentity {
+	key, _ := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
+	taskID, _ := proxywasm.GetHttpRequestHeader(WujieTaskID)
+	return usageIdentity{userKey: key, requestID: getRequestID(), taskID: taskID}
 }
 
 func getRequestID() string {
@@ -652,49 +669,20 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		return
 	}
 
-	// Get userKey from X-Original-Api-Key header
-	userKey, err := proxywasm.GetHttpRequestHeader(OriginalAPIKey)
-	if err != nil || userKey == "" {
+	identity, captured := ctx.GetContext("billingIdentity").(usageIdentity)
+	if !captured {
+		// Legacy routes may receive their request metadata after this filter's decode callback.
+		identity = readUsageIdentity()
+		if identity.requestID == "" {
+			identity.requestID = fmt.Sprintf("%s%d", generateRandomString(8), time.Now().UnixMilli())
+		}
+	}
+	if identity.userKey == "" {
 		log.Debugf("X-Original-Api-Key header not found, skipping token usage report")
 		return
 	}
-
-	// Get Envoy request ID from x-request-id header
-	// Get wujie business task id from request header (OPE-8474).
-	// Plain numeric string only; the Onepiece receiver deserializes it into a Long taskId.
-	taskId, err := proxywasm.GetHttpRequestHeader(WujieTaskID)
-	if err != nil || taskId == "" {
-		taskId = ""
-	} else {
-		log.Debugf("ai-token-report: wujie_task_id header found: %s", taskId)
-	}
-
-	// Get Envoy request ID from property
-	envoyRequestID := ""
-	if requestIDHeader, err := proxywasm.GetHttpRequestHeader("x-request-id"); err == nil {
-		envoyRequestID = requestIDHeader
-		if envoyRequestID != "" && envoyRequestID != "-" {
-			log.Infof("Using Envoy request ID from x-request-id header: %s", envoyRequestID)
-		} else {
-			log.Debugf("x-request-id header is empty or '-', will generate one")
-			envoyRequestID = ""
-		}
-	} else {
-		log.Debugf("Failed to get x-request-id header: %v", err)
-	}
-
+	requestID := identity.requestID
 	timestamp := time.Now().UnixMilli()
-	var requestID string
-	selectedRequestID := getRequestID()
-	if selectedRequestID != "" {
-		requestID = selectedRequestID
-		log.Debugf("reportTokenUsage using request ID: %s", selectedRequestID)
-	} else {
-		randomSuffix := generateRandomString(8)
-		requestID = fmt.Sprintf("%s%d", randomSuffix, timestamp)
-		log.Debugf("reportTokenUsage using generated ID: %s", requestID)
-	}
-
 	teamID, _ := ctx.GetContext("billingTeamId").(int64)
 	personalOwnerUID, _ := ctx.GetContext("billingPersonalOwnerUid").(int64)
 	if config.requireTeamID && teamID <= 0 {
@@ -707,7 +695,7 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		ProductSource:    ctx.GetStringContext(CtxProductSource, config.source.fallbackValue),
 		RequestId:        requestID,
 		Model:            model,
-		UserKey:          userKey,
+		UserKey:          identity.userKey,
 		InputToken:       int64(inputTokens),
 		OutputToken:      int64(outputTokens),
 		TotalToken:       int64(totalTokens),
@@ -716,7 +704,7 @@ func reportTokenUsage(config TokenUsageReportConfig, ctx wrapper.HttpContext, mo
 		StartTime:        startTime,
 		EndTime:          endTime,
 		TokenUsage:       tokenUsage,
-		TaskId:           taskId,
+		TaskId:           identity.taskID,
 		TeamID:           teamID,
 		PersonalOwnerUID: personalOwnerUID,
 	}

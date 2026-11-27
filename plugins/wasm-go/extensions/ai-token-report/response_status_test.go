@@ -87,9 +87,9 @@ func TestRequestBillingPolicy(t *testing.T) {
 		const team = `,"requireTeamId":true,"teamReportService":"team.internal.dns"`
 		const previous = `,"teamUnlistedPathConfig":{"reportApiUrl":"https://billing.test/previous","reportServiceName":"old"}`
 		for _, tc := range []struct {
-			name, extra, version, id, wantPath                              string
-			unlisted, lateHeader, personalOwner, missingProvider, forwarded bool
-			status                                                          uint32
+			name, extra, version, id, wantPath                                                            string
+			unlisted, lateHeader, personalOwner, missingProvider, forwarded, missingKey, missingRequestID bool
+			status                                                                                        uint32
 		}{
 			{name: "legacy reports once", wantPath: "/report"},
 			{name: "legacy rejects unsupported versioned billing before upstream", version: "2", status: 503},
@@ -100,6 +100,10 @@ func TestRequestBillingPolicy(t *testing.T) {
 			{name: "personal wallet admission", personalOwner: true, extra: team, version: "2", id: "42", status: 503},
 			{name: "forwarding is settled by execution", version: "2", id: "42", missingProvider: true, forwarded: true},
 			{name: "missing usage provider", extra: team, version: "2", id: "42", missingProvider: true, status: 503},
+			{name: "default team on usage route with missing provider", extra: team, id: "42", missingProvider: true, status: 503},
+			{name: "default team with disabled reporting", extra: team + `,"disableOpenaiUsage":true`, id: "42", status: 503},
+			{name: "team report without request id", extra: team, id: "42", missingRequestID: true, status: 503},
+			{name: "team report without original key", extra: team, id: "42", missingKey: true, status: 503},
 			{name: "valid admission", extra: team, version: "2", id: "42", wantPath: "/internal/model/usage/team-report"},
 			{name: "unlisted uses original report", extra: team + previous, unlisted: true, wantPath: "/previous"},
 			{name: "original disabled report", extra: team + `,"teamUnlistedPathConfig":{}`, unlisted: true},
@@ -126,7 +130,13 @@ func TestRequestBillingPolicy(t *testing.T) {
 				if tc.unlisted {
 					require.NoError(t, host.SetProperty([]string{"wasm.teamBillingUnlistedPath"}, []byte("1")))
 				}
-				headers := [][2]string{{":method", "POST"}, {":path", "/v1/test"}, {":authority", "model.test"}, {OriginalAPIKey, "fixture"}}
+				headers := [][2]string{{":method", "POST"}, {":path", "/v1/test"}, {":authority", "model.test"}}
+				if tc.missingRequestID {
+					require.NoError(t, host.SetRequestId("-"))
+				}
+				if !tc.missingKey {
+					headers = append(headers, [2]string{OriginalAPIKey, "fixture"})
+				}
 				if tc.version != "" {
 					headers = append(headers, [2]string{"X-Wujie-Billing-Version", tc.version})
 				}

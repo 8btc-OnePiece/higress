@@ -248,4 +248,4 @@ For issues and questions, please refer to the Higress documentation and communit
 首批聊天和 Banana 使用上述三种结算配置，无需新增签名密钥。仅在实际聊天和出图路由启用用量上报。
 成员或余额校验失败分别返回 HTTP 422 的 `team_access_denied` 或 `team_credits_unavailable`。
 
-采用原 URL 的网关可在模型前缀规则上设置 `teamPaidPaths` 精确路径列表。名单外的新版请求在进入上游前被拒绝。迁移已有前缀时，将旧余额规则的有效配置保存在 `teamUnlistedPathConfig`（原先关闭时为 `{}`），并在上报插件保存其自身的旧配置。旧请求按原规则处理，原规则无法识别显式团队时拒绝请求。未提供旧余额配置时沿用现有 `apiUrl` 做旧余额检查。原来未启用余额检查的入口可启用 `teamVersionGuardOnly: true`，仅拒绝带计费版本的未迁移请求，保留旧请求的直通行为。
+采用原 URL 的网关可在模型前缀规则上设置 `teamPaidPaths` 精确路径列表。若仅 POST 产生消费，可同时设置 `teamPaidMethod: POST`；GET、OPTIONS 等方法按名单外请求处理。省略该字段时仅按路径匹配。名单外的新版请求在进入上游前被拒绝。迁移已有前缀时，将旧余额规则的有效配置保存在 `teamUnlistedPathConfig`（原先关闭时为 `{}`），并在上报插件保存其自身的旧配置。旧请求按原规则处理，原规则无法识别显式团队时拒绝请求。未提供旧余额配置时沿用现有 `apiUrl` 做旧余额检查。原来未启用余额检查的入口可启用 `teamVersionGuardOnly: true`，仅拒绝带计费版本的未迁移请求，保留旧请求的直通行为。若全局启用这一守卫，迁移路由的有效配置须显式设置 `teamVersionGuardOnly: false`。同时配置仅守卫和团队路由策略会导致插件配置校验失败。

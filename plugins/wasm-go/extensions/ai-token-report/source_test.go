@@ -178,7 +178,8 @@ func TestPerCallSettlement(t *testing.T) {
 				priceModel := tc.priceModel
 				require.NoError(t, host.SetProperty([]string{"wasm.teamId"}, []byte("57")))
 				require.NoError(t, host.SetProperty([]string{"wasm.teamBillingPerCallModel"}, []byte(priceModel)))
-				host.CallOnRequestHeaders(id, [][2]string{{":authority", "model.test"}, {":method", "POST"}, {":path", "/team/v1/images/generations"}, {"request-id", "wjat-fixture"}, {"x-original-api-key", "fixture-key"}}, false)
+				host.CallOnRequestHeaders(id, [][2]string{{":authority", "model.test"}, {":method", "POST"}, {":path", "/team/v1/images/generations"}, {"request-id", "wjat-fixture"}, {"x-original-api-key", "fixture-key"}, {WujieTaskID, "2534"}}, false)
+				host.SetHttpRequestHeaders(id, [][2]string{{":method", "POST"}, {":authority", "provider.test"}, {":path", "/rewritten"}, {"request-id", "provider-request"}})
 				host.CallOnResponseHeaders(id, [][2]string{{":status", tc.status}, {"content-type", "application/json"}}, false)
 				require.NoError(t, proxywasm.RemoveHttpResponseHeader(":status"))
 				body := []byte(tc.body)
@@ -195,6 +196,8 @@ func TestPerCallSettlement(t *testing.T) {
 					require.Contains(t, calls[0].Headers, [2]string{":path", "/internal/model/usage/team-report"})
 					var report TokenUsageReportRequest
 					require.NoError(t, json.Unmarshal(calls[0].Body, &report))
+					require.Equal(t, "fixture-key", report.UserKey)
+					require.Equal(t, "2534", report.TaskId)
 					require.Equal(t, priceModel, report.Model)
 					require.Equal(t, "wjat-fixture", report.RequestId)
 					require.EqualValues(t, 57, report.TeamID)

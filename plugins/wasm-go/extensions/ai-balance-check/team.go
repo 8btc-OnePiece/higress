@@ -32,6 +32,9 @@ func checkTeamAdmission(ctx wrapper.HttpContext, config BalanceCheckConfig, team
 	if apiKey == "" {
 		return teamAdmissionError(http.StatusUnauthorized)
 	}
+	if config.teamRouteMode != "" && teamUUID != nil && !canonicalTeamUUID.MatchString(strings.ToLower(*teamUUID)) {
+		return teamAdmissionError(http.StatusBadRequest)
+	}
 	endpoint := config.teamEndpoint
 	body, _ := json.Marshal(struct {
 		TeamUUID *string `json:"teamUuid,omitempty"`

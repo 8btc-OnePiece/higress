@@ -46,6 +46,7 @@ type BalanceCheckConfig struct {
 	teamSettlement        string
 	teamVersionGuardOnly  bool
 	teamPaidPaths         map[string]bool
+	teamPaidMethod        string
 	unlistedConfig        *BalanceCheckConfig
 	teamFallback          string
 	teamSigningKey        string
@@ -64,7 +65,14 @@ func init() {
 
 func parseConfig(json gjson.Result, config *BalanceCheckConfig) error {
 	config.teamVersionGuardOnly = json.Get("teamVersionGuardOnly").Bool()
+	config.teamPaidMethod = json.Get("teamPaidMethod").String()
+	if config.teamPaidMethod != "" && (config.teamPaidMethod != http.MethodPost || !json.Get("teamPaidPaths").Exists()) {
+		return fmt.Errorf("teamPaidMethod requires POST and teamPaidPaths")
+	}
 	if config.teamVersionGuardOnly {
+		if json.Get("teamRouteMode").String() != "" || json.Get("teamSettlement").String() != "" || json.Get("teamPaidPaths").Exists() {
+			return fmt.Errorf("teamVersionGuardOnly must be false on a migrated team route")
+		}
 		return nil
 	}
 	if paths := json.Get("teamPaidPaths"); paths.Exists() {
@@ -257,7 +265,15 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config BalanceCheckConfig) ty
 			return teamAdmissionError(http.StatusServiceUnavailable)
 		}
 		path, _, _ := strings.Cut(raw, "?")
-		if !config.teamPaidPaths[path] {
+		paid := config.teamPaidPaths[path]
+		if paid && config.teamPaidMethod != "" {
+			method, err := proxywasm.GetHttpRequestHeader(":method")
+			if err != nil || method == "" {
+				return teamAdmissionError(http.StatusServiceUnavailable)
+			}
+			paid = method == config.teamPaidMethod
+		}
+		if !paid {
 			if marked || config.teamRouteMode == "strict" {
 				return teamAdmissionError(http.StatusServiceUnavailable)
 			}
